@@ -6,8 +6,8 @@
 int monitor_init(void);
 void monitor_cleanup(void);
 
-void monitor_enable();
-void monitor_disable();
+void monitor_enable(void);
+void monitor_disable(void);
 int monitor_should_throttle(void);
 
 int monitor_is_enabled(void);

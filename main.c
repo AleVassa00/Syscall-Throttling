@@ -57,9 +57,9 @@ err_device:
 err_hooks:
     monitor_cleanup();
 err_monitor:
-    stats_cleanup();
+ //   stats_cleanup();
 //err_stats:
-  //  registry_cleanup();
+    registry_cleanup();
 err_registry:
     return ret;
 }
