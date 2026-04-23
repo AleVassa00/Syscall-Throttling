@@ -1,175 +1,89 @@
-#include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/kprobes.h>
-#include <linux/syscalls.h>
-#include <linux/cred.h>
-#include <linux/sched.h>
-#include <asm/paravirt.h>
+#include <linux/ktime.h>
+#include <linux/wait.h>
+#include <linux/atomic.h>
 
-#include "syscall_hook.h"
 #include "monitor.h"
-#include "registry.h"
 
 #define MODNAME "syscall_monitor"
+#define WINDOW_NS 1000000000ULL // 1 secondo
 
 // ==============================
-// GLOBALI
+// GLOBAL STATE
 // ==============================
 
-unsigned long **sys_call_table = NULL;
-static unsigned long (*kallsyms_lookup_name_fn)(const char *name);
+static atomic_t counter;
+static u64 window_start;
 
-// syscall che hookiamo
-static int hooked_syscalls[] = {
-    __NR_openat,
-    __NR_read,
-    __NR_write
-};
+static int max_calls = 100;
+static int monitor_enabled = 0;
 
-#define HOOK_COUNT (sizeof(hooked_syscalls)/sizeof(int))
-
-// originali
-static void *original_syscalls[512];
+static wait_queue_head_t wait_queue;
 
 // ==============================
-// WRITE PROTECTION
+// INIT
 // ==============================
 
-static void disable_write_protection(void) {
-    write_cr0(read_cr0() & (~0x10000));
-}
+int monitor_init(void) {
+    atomic_set(&counter, 0);
+    window_start = ktime_get_ns();
+    init_waitqueue_head(&wait_queue);
+    monitor_enabled = 0;
 
-static void enable_write_protection(void) {
-    write_cr0(read_cr0() | 0x10000);
-}
-
-// ==============================
-// RESOLVE kallsyms
-// ==============================
-
-static int resolve_kallsyms_lookup_name(void) {
-    struct kprobe kp = {
-        .symbol_name = "kallsyms_lookup_name"
-    };
-
-    if (register_kprobe(&kp) < 0)
-        return -1;
-
-    kallsyms_lookup_name_fn = (void *)kp.addr;
-    unregister_kprobe(&kp);
-
+    printk(KERN_INFO "%s: monitor initialized\n", MODNAME);
     return 0;
 }
 
 // ==============================
-// RESOLVE SYSCALL TABLE
+// CONTROL
 // ==============================
 
-int resolve_syscall_table(void) {
+void monitor_enable(void) {
+    monitor_enabled = 1;
+}
 
-    if (resolve_kallsyms_lookup_name() < 0)
-        return -1;
+void monitor_disable(void) {
+    monitor_enabled = 0;
+}
 
-    sys_call_table = (unsigned long **)
-        kallsyms_lookup_name_fn("sys_call_table");
+int monitor_is_enabled(void) {
+    return monitor_enabled;
+}
 
-    if (!sys_call_table)
-        return -1;
+void monitor_set_max(int max) {
+    max_calls = max;
+}
 
-    printk(KERN_INFO "%s: syscall table found\n", MODNAME);
+// ==============================
+// LOGIC
+// ==============================
 
+int monitor_should_throttle(void) {
+
+    u64 now = ktime_get_ns();
+
+    if (now - window_start >= WINDOW_NS) {
+        window_start = now;
+        atomic_set(&counter, 0);
+        wake_up_all(&wait_queue);
+    }
+
+    if (atomic_read(&counter) >= max_calls)
+        return 1;
+
+    atomic_inc(&counter);
     return 0;
 }
 
 // ==============================
-// CALL ORIGINALE
+// BLOCK
 // ==============================
 
-static inline long call_original(int nr, const struct pt_regs *regs) {
-    return ((long (*)(const struct pt_regs *))
-            original_syscalls[nr])(regs);
+void monitor_block_current(void) {
+    wait_event_interruptible(wait_queue,
+        atomic_read(&counter) < max_calls
+    );
 }
-
-// ==============================
-// WRAPPER GENERICO
-// ==============================
-
-asmlinkage long hooked_syscall(const struct pt_regs *regs) {
-
-    int nr = regs->orig_ax;
-
-    uid_t uid = current_uid().val;
-    const char *comm = current->comm;
-
-    // DEBUG
-    printk(KERN_INFO "%s: syscall %d called by %s\n", MODNAME, nr, comm);
-
-    // filtro syscall
-    if (!is_syscall_monitored(nr))
-        return call_original(nr, regs);
-
-    // filtro entità
-    if (!is_uid_monitored(uid) && !is_comm_monitored(comm))
-        return call_original(nr, regs);
-
-    // throttling
-    if (monitor_should_throttle(uid, comm)) {
-        printk(KERN_INFO "%s: throttling syscall %d\n", MODNAME, nr);
-        monitor_block_current();
-    }
-
-    return call_original(nr, regs);
-}
-
-// ==============================
-// INSTALL HOOK
-// ==============================
-
-int install_syscall_hooks(void) {
-
-    int i;
-
-    if (!sys_call_table)
-        return -1;
-
-    disable_write_protection();
-
-    for (i = 0; i < HOOK_COUNT; i++) {
-
-        int nr = hooked_syscalls[i];
-
-        original_syscalls[nr] = (void *)sys_call_table[nr];
-        sys_call_table[nr] = (unsigned long *)hooked_syscall;
-
-        printk(KERN_INFO "%s: hooked syscall %d\n", MODNAME, nr);
-    }
-
-    enable_write_protection();
-
-    return 0;
-}
-
-// ==============================
-// UNINSTALL HOOK
-// ==============================
-
-void uninstall_syscall_hooks(void) {
-
-    int i;
-
-    if (!sys_call_table)
-        return;
-
-    disable_write_protection();
-
-    for (i = 0; i < HOOK_COUNT; i++) {
-
-        int nr = hooked_syscalls[i];
-
-        sys_call_table[nr] = (unsigned long *)original_syscalls[nr];
-
-        printk(KERN_INFO "%s: restored syscall %d\n", MODNAME, nr);
-    }
-
-    enable_write_protection();
+void monitor_cleanup(void) {
+    printk(KERN_INFO "%s: monitor cleaned\n", MODNAME);
 }

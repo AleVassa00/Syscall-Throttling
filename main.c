@@ -27,10 +27,10 @@ static int __init syscall_monitor_init(void) {
         goto err_registry;
 
     // 3️⃣ Init stats
-    ret = stats_init();
+    /*ret = stats_init();
     if (ret < 0)
         goto err_stats;
-
+*/
     // 4️⃣ Init monitor (throttling logic)
     ret = monitor_init();
     if (ret < 0)
@@ -47,7 +47,7 @@ static int __init syscall_monitor_init(void) {
         goto err_device;
 
     // 7️⃣ Monitor OFF di default
-    monitor_set_enabled(0);
+    monitor_disable();
 
     printk(KERN_INFO "%s: loaded successfully\n", MODNAME);
     return 0;
@@ -58,8 +58,8 @@ err_hooks:
     monitor_cleanup();
 err_monitor:
     stats_cleanup();
-err_stats:
-    registry_cleanup();
+//err_stats:
+  //  registry_cleanup();
 err_registry:
     return ret;
 }
@@ -73,7 +73,7 @@ static void __exit syscall_monitor_exit(void) {
     device_cleanup();
     uninstall_syscall_hooks();
     monitor_cleanup();
-    stats_cleanup();
+  //  stats_cleanup();
     registry_cleanup();
 
     printk(KERN_INFO "%s: unloaded\n", MODNAME);
