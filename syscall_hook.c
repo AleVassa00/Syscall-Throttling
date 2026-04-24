@@ -21,9 +21,7 @@ static unsigned long (*kallsyms_lookup_name_fn)(const char *name);
 
 // syscall da hookare
 static int hooked_syscalls[] = {
-    __NR_openat,
-    __NR_read,
-    __NR_write
+    __NR_getpid
 };
 
 #define HOOK_COUNT (sizeof(hooked_syscalls)/sizeof(int))
@@ -90,7 +88,9 @@ static inline long call_original(int nr, const struct pt_regs *regs) {
 // WRAPPER
 // ==============================
 
-asmlinkage long hooked_syscall(const struct pt_regs *regs) {
+
+
+static asmlinkage long hooked_syscall(const struct pt_regs *regs) {
 
     int nr = regs->orig_ax;
 

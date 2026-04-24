@@ -114,8 +114,9 @@ int device_init(void)
     }
 
     // crea classe
-    dev_class = class_create(THIS_MODULE, DEVICE_NAME);
+    dev_class = class_create(DEVICE_NAME);
     if (IS_ERR(dev_class)) {
+        printk(KERN_ERR "class_create failed: %ld\n", PTR_ERR(dev_class));
         unregister_chrdev(major, DEVICE_NAME);
         return PTR_ERR(dev_class);
     }
@@ -143,7 +144,7 @@ int device_init(void)
 void device_cleanup(void)
 {
    if (dev_device){
-        devicedevice_destroy(dev_class, MKDEV(major, 0));
+        device_destroy(dev_class, MKDEV(major, 0));
    }
 
     if (dev_class){
