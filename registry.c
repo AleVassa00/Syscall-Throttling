@@ -73,12 +73,14 @@ void registry_cleanup(void) {
 // ==============================
 
 int add_syscall(int nr) {
+    
     struct syscall_entry *e;
 
     list_for_each_entry(e, &syscall_list, list) {
         if (e->nr == nr)
             return -EEXIST;
     }
+    install_syscall_hooks(nr);
 
     e = kmalloc(sizeof(*e), GFP_KERNEL);
     if (!e)
@@ -92,7 +94,7 @@ int add_syscall(int nr) {
 int add_uid(uid_t uid) {
     struct uid_entry *e;
 
-    list_for_each_entry(e, &uid_list, list) {
+    list_for_each_entry(e, &uid_list, list) { //check non ottimizzato su presenza nella lista
         if (e->uid == uid)
             return -EEXIST;
     }

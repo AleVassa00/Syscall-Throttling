@@ -26,7 +26,7 @@ static int hooked_syscalls[] = {
 
 #define HOOK_COUNT (sizeof(hooked_syscalls)/sizeof(int))
 
-static void *original_syscalls[512];
+static void *original_syscalls[NR_syscalls];
 
 // ==============================
 // WRITE PROTECTION

@@ -12,7 +12,7 @@
 // GLOBAL STATE
 // ==============================
 
-static atomic_t counter;
+static atomic_t counter; //sto settando un contatore globale
 static u64 window_start;
 
 static int max_calls = 100;
@@ -28,7 +28,7 @@ int monitor_init(void) {
     atomic_set(&counter, 0);
     window_start = ktime_get_ns();
     init_waitqueue_head(&wait_queue);
-    monitor_enabled = 0;
+    monitor_enabled = 0; //parto col monitor disabilitato
 
     printk(KERN_INFO "%s: monitor initialized\n", MODNAME);
     return 0;
