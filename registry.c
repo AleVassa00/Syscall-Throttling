@@ -30,8 +30,6 @@ struct comm_entry {
 // ==============================
 // LIST HEADS
 // ==============================
-
-static LIST_HEAD(syscall_list);
 static LIST_HEAD(uid_list);
 static LIST_HEAD(comm_list);
 
@@ -72,24 +70,6 @@ void registry_cleanup(void) {
 // ADD
 // ==============================
 
-int add_syscall(int nr) {
-    
-    struct syscall_entry *e;
-
-    list_for_each_entry(e, &syscall_list, list) {
-        if (e->nr == nr)
-            return -EEXIST;
-    }
-    install_syscall_hooks(nr);
-
-    e = kmalloc(sizeof(*e), GFP_KERNEL);
-    if (!e)
-        return -ENOMEM;
-
-    e->nr = nr;
-    list_add(&e->list, &syscall_list);
-    return 0;
-}
 
 int add_uid(uid_t uid) {
     struct uid_entry *e;
@@ -131,16 +111,6 @@ int add_comm(const char *comm) {
 // CHECK
 // ==============================
 
-int is_syscall_monitored(int nr) {
-    struct syscall_entry *e;
-
-    list_for_each_entry(e, &syscall_list, list) {
-        if (e->nr == nr)
-            return 1;
-    }
-    return 0;
-}
-
 int is_uid_monitored(uid_t uid) {
     struct uid_entry *e;
 
@@ -164,20 +134,6 @@ int is_comm_monitored(const char *comm) {
 // ==============================
 // REMOVE
 // ==============================
-
-int remove_syscall(int nr) {
-    struct syscall_entry *e, *tmp;
-
-    list_for_each_entry_safe(e, tmp, &syscall_list, list) {
-        if (e->nr == nr) {
-            list_del(&e->list);
-            kfree(e);
-            return 0;
-        }
-    }
-
-    return -ENOENT;
-}
 
 int remove_uid(uid_t uid) {
     struct uid_entry *e, *tmp;

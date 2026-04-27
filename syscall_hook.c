@@ -1,10 +1,10 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/kprobes.h>
-#include <linux/syscalls.h>
-#include <linux/cred.h>
+#include <linux/ftrace.h>
+#include <linux/kallsyms.h>
+#include <linux/slab.h>
+#include <linux/ptrace.h>
 #include <linux/sched.h>
-#include <asm/paravirt.h>
 
 #include "syscall_hook.h"
 #include "monitor.h"
@@ -16,151 +16,164 @@
 // GLOBALS
 // ==============================
 
-unsigned long **sys_call_table = NULL;
-static unsigned long (*kallsyms_lookup_name_fn)(const char *name);
+static unsigned long **sys_call_table;
 
-// syscall da hookare
-static int hooked_syscalls[] = {
-    __NR_getpid
+struct ftrace_hook {
+    unsigned long address;
+    void *function;
+    void *original;
+    struct ftrace_ops ops;
 };
 
-#define HOOK_COUNT (sizeof(hooked_syscalls)/sizeof(int))
-
-static void *original_syscalls[NR_syscalls];
+static struct ftrace_hook *hooks;
+static int hooks_count;
 
 // ==============================
-// WRITE PROTECTION
+// FTRACE CALLBACK
 // ==============================
 
-static void disable_write_protection(void) {
-    write_cr0(read_cr0() & (~0x10000));
+static void notrace ftrace_callback(unsigned long ip, unsigned long parent_ip,
+                                    struct ftrace_ops *ops, struct pt_regs *regs)
+{
+    struct ftrace_hook *hook =
+        container_of(ops, struct ftrace_hook, ops);
+
+    regs->ip = (unsigned long)hook->function;
 }
 
-static void enable_write_protection(void) {
-    write_cr0(read_cr0() | 0x10000);
-}
-
 // ==============================
-// RESOLVE SYMBOL
+// INSTALL SINGLE HOOK
 // ==============================
 
-static int resolve_kallsyms_lookup_name(void) {
-    struct kprobe kp = { .symbol_name = "kallsyms_lookup_name" };
+static int install_ftrace_hook(struct ftrace_hook *hook)
+{
+    int ret;
 
-    if (register_kprobe(&kp) < 0)
-        return -1;
+    hook->ops.func = ftrace_callback;
+    hook->ops.flags = FTRACE_OPS_FL_SAVE_REGS |
+                      FTRACE_OPS_FL_RECURSION_SAFE |
+                      FTRACE_OPS_FL_IPMODIFY;
 
-    kallsyms_lookup_name_fn = (void *)kp.addr;
-    unregister_kprobe(&kp);
+    ret = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
+    if (ret) {
+        printk(KERN_WARNING "%s: filter failed %d\n", MODNAME, ret);
+        return ret;
+    }
+
+    ret = register_ftrace_function(&hook->ops);
+    if (ret) {
+        printk(KERN_WARNING "%s: register failed %d\n", MODNAME, ret);
+        ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
+        return ret;
+    }
+
+    hook->original = (void *)hook->address;
 
     return 0;
 }
 
 // ==============================
-// SYSCALL TABLE
+// REMOVE SINGLE HOOK
 // ==============================
 
-int resolve_syscall_table(void) {
-
-    if (resolve_kallsyms_lookup_name() < 0)
-        return -1;
-
-    sys_call_table = (unsigned long **)
-        kallsyms_lookup_name_fn("sys_call_table");
-
-    if (!sys_call_table)
-        return -1;
-
-    printk(KERN_INFO "%s: syscall table found\n", MODNAME);
-    return 0;
-}
-
-// ==============================
-// CALL ORIGINAL
-// ==============================
-
-static inline long call_original(int nr, const struct pt_regs *regs) {
-    return ((long (*)(const struct pt_regs *))
-            original_syscalls[nr])(regs);
+static void remove_ftrace_hook(struct ftrace_hook *hook)
+{
+    unregister_ftrace_function(&hook->ops);
+    ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
 }
 
 // ==============================
 // WRAPPER
 // ==============================
 
-
-
-static asmlinkage long hooked_syscall(const struct pt_regs *regs) {
-
+static asmlinkage long syscall_wrapper(const struct pt_regs *regs)
+{
     int nr = regs->orig_ax;
 
     uid_t uid = current_uid().val;
     const char *comm = current->comm;
 
     if (!monitor_is_enabled())
-        return call_original(nr, regs);
-
-    if (!is_syscall_monitored(nr))
-        return call_original(nr, regs);
+        return ((long (*)(const struct pt_regs *))hooks[nr].original)(regs);
 
     if (!is_uid_monitored(uid) && !is_comm_monitored(comm))
-        return call_original(nr, regs);
+        return ((long (*)(const struct pt_regs *))hooks[nr].original)(regs);
 
-    if (monitor_should_throttle()) {
+    if (monitor_should_throttle())
         monitor_block_current();
-    }
 
-    return call_original(nr, regs);
+    return ((long (*)(const struct pt_regs *))hooks[nr].original)(regs);
 }
 
 // ==============================
-// INSTALL
+// INSTALL ALL HOOKS
 // ==============================
 
-int install_syscall_hooks(void) {
 
+
+
+int install_all_hooks(void)
+{
     int i;
 
-    if (!sys_call_table)
+    kallsyms_lookup_name_fn = get_kallsyms_lookup_name_fn();
+
+    sys_call_table = (unsigned long **)
+        kallsyms_lookup_name_fn("sys_call_table");
+
+    if (!sys_call_table) {
+        printk(KERN_ERR "%s: sys_call_table not found\n", MODNAME);
         return -1;
-
-    disable_write_protection();
-
-    for (i = 0; i < HOOK_COUNT; i++) {
-
-        int nr = hooked_syscalls[i];
-
-        original_syscalls[nr] = (void *)sys_call_table[nr];
-        sys_call_table[nr] = (unsigned long *)hooked_syscall;
     }
 
-    enable_write_protection();
+    hooks_count = NR_syscalls;
 
-    printk(KERN_INFO "%s: hooks installed\n", MODNAME);
+    hooks = kmalloc_array(hooks_count,
+                          sizeof(struct ftrace_hook),
+                          GFP_KERNEL);
+    if (!hooks)
+        return -ENOMEM;
+
+    for (i = 0; i < hooks_count; i++) {
+
+        unsigned long addr = (unsigned long)sys_call_table[i];
+
+        if (!addr)
+            continue;
+
+        hooks[i].address = addr;
+        hooks[i].function = syscall_wrapper;
+
+        if (install_ftrace_hook(&hooks[i])) {
+            printk(KERN_WARNING "%s: hook failed for syscall %d\n",
+                   MODNAME, i);
+        }
+    }
+
+    printk(KERN_INFO "%s: installed %d hooks\n",
+           MODNAME, hooks_count);
+
     return 0;
 }
 
 // ==============================
-// UNINSTALL
+// UNINSTALL ALL HOOKS
 // ==============================
 
-void uninstall_syscall_hooks(void) {
-
+void uninstall_all_hooks(void)
+{
     int i;
 
-    if (!sys_call_table)
+    if (!hooks)
         return;
 
-    disable_write_protection();
-
-    for (i = 0; i < HOOK_COUNT; i++) {
-
-        int nr = hooked_syscalls[i];
-
-        sys_call_table[nr] = (unsigned long *)original_syscalls[nr];
+    for (i = 0; i < hooks_count; i++) {
+        if (hooks[i].address)
+            remove_ftrace_hook(&hooks[i]);
     }
 
-    enable_write_protection();
+    kfree(hooks);
+    hooks = NULL;
 
     printk(KERN_INFO "%s: hooks removed\n", MODNAME);
 }

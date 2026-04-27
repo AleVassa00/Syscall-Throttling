@@ -38,14 +38,15 @@ int monitor_init(void) {
 // CONTROL
 // ==============================
 
-void monitor_enable(void) {
+void monitor_enable(void)
+{
     monitor_enabled = 1;
 }
 
-void monitor_disable(void) {
+void monitor_disable(void)
+{
     monitor_enabled = 0;
 }
-
 int monitor_is_enabled(void) {
     return monitor_enabled;
 }

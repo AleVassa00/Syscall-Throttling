@@ -17,14 +17,12 @@ static struct device *dev_device = NULL;
 // ==============================
 // IOCTL HANDLER
 // ==============================
-
 static long device_ioctl(struct file *file,
                          unsigned int cmd,
                          unsigned long arg)
 {
-    if (_IOC_TYPE(cmd) != SC_MAGIC){
+    if (_IOC_TYPE(cmd) != SC_MAGIC)
         return -EINVAL;
-    }
 
     int value;
     char comm[TASK_COMM_LEN];
@@ -33,62 +31,46 @@ static long device_ioctl(struct file *file,
 
     case IOCTL_ADD_UID:
         value = (int)arg;
-        add_uid((uid_t)value);
-        printk(KERN_INFO "Added UID: %d\n", value);
-        break;
-
-    case IOCTL_ADD_SYSCALL:
-        value = (int)arg;
-        add_syscall(value);
-        printk(KERN_INFO "Added syscall: %d\n", value);
-        break;
+        return add_uid((uid_t)value);
 
     case IOCTL_ADD_COMM:
         if (copy_from_user(comm, (char __user *)arg, TASK_COMM_LEN))
             return -EFAULT;
 
         comm[TASK_COMM_LEN - 1] = '\0';
-        add_comm(comm);
-        printk(KERN_INFO "Added comm: %s\n", comm);
-        break;
+        return add_comm(comm);
 
-    case IOCTL_ENABLE:
-        monitor_enable();
-        printk(KERN_INFO "Monitor enabled\n");
-        break;
+    case IOCTL_REMOVE_UID:
+        value = (int)arg;
+        return remove_uid(value);
 
-    case IOCTL_DISABLE:
-        monitor_disable();
-        printk(KERN_INFO "Monitor disabled\n");
-        break;
+    case IOCTL_REMOVE_COMM:
+        if (copy_from_user(comm, (char __user *)arg, TASK_COMM_LEN))
+            return -EFAULT;
+
+        comm[TASK_COMM_LEN - 1] = '\0';
+        return remove_comm(comm);
 
     case IOCTL_SET_MAX:
         value = (int)arg;
         monitor_set_max(value);
-        printk(KERN_INFO "Max calls set: %d\n", value);
-        break;
-    case IOCTL_REMOVE_UID:
-        value = (int)arg;
-        remove_uid(value);
-        break;
+        return 0;
 
-    case IOCTL_REMOVE_SYSCALL:
-        value = (int)arg;
-        remove_syscall(value);
-        break;
+    case IOCTL_ENABLE:
+        // 👉 controllo configurazione
+        if (is_uid_list_empty() && is_comm_list_empty())
+            return -EINVAL;
 
-    case IOCTL_REMOVE_COMM:
-        if (copy_from_user(comm, (char __user *)arg, 16))
-            return -EFAULT;
-        comm[15] = '\0';
-        remove_comm(comm);
-        break;
+        monitor_enable();
 
+        return 0;
+
+    case IOCTL_DISABLE:
+        monitor_disable();
+        return 0;
     default:
         return -EINVAL;
     }
-
-    return 0;
 }
 
 // ==============================

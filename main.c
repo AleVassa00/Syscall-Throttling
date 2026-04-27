@@ -13,11 +13,8 @@ static int __init syscall_monitor_init(void) {
     int ret;
 
     printk(KERN_INFO "%s: init\n", MODNAME);
-
-    // 1️⃣ Resolve sys_call_table
-    ret = resolve_syscall_table();
-    if (ret < 0) {
-        printk(KERN_ERR "%s: failed to resolve syscall table\n", MODNAME);
+    ret = resolve_kallsyms_lookup_name();
+    if (ret < 0){
         return ret;
     }
 
@@ -37,7 +34,7 @@ static int __init syscall_monitor_init(void) {
         goto err_monitor;
 
     // 5️⃣ Hook syscall
-    ret = install_syscall_hooks();
+    ret = install_all_hooks();
     if (ret < 0)
         goto err_hooks;
 
