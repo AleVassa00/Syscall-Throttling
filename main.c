@@ -50,7 +50,7 @@ static int __init syscall_monitor_init(void) {
     return 0;
 
 err_device:
-    uninstall_syscall_hooks();
+    uninstall_all_hooks();
 err_hooks:
     monitor_cleanup();
 err_monitor:
@@ -68,7 +68,7 @@ static void __exit syscall_monitor_exit(void) {
 
     // ordine inverso rispetto init
     device_cleanup();
-    uninstall_syscall_hooks();
+    uninstall_all_hooks();
     monitor_cleanup();
   //  stats_cleanup();
     registry_cleanup();

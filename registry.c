@@ -9,7 +9,7 @@
 #define MODNAME "syscall_monitor"
 
 // ==============================
-// STRUCTURES (SENZA CONTATORI)
+// STRUCTURES
 // ==============================
 
 struct syscall_entry {
@@ -28,8 +28,10 @@ struct comm_entry {
 };
 
 // ==============================
-// LIST HEADS
+// LISTS
 // ==============================
+
+static LIST_HEAD(syscall_list);
 static LIST_HEAD(uid_list);
 static LIST_HEAD(comm_list);
 
@@ -43,7 +45,6 @@ int registry_init(void) {
 }
 
 void registry_cleanup(void) {
-
     struct syscall_entry *s, *s_tmp;
     struct uid_entry *u, *u_tmp;
     struct comm_entry *c, *c_tmp;
@@ -62,26 +63,38 @@ void registry_cleanup(void) {
         list_del(&c->list);
         kfree(c);
     }
-
-    printk(KERN_INFO "%s: registry cleaned\n", MODNAME);
 }
 
 // ==============================
 // ADD
 // ==============================
 
+int add_syscall(int nr) {
+    struct syscall_entry *e;
+
+    list_for_each_entry(e, &syscall_list, list) {
+        if (e->nr == nr)
+            return -EEXIST;
+    }
+
+    e = kmalloc(sizeof(*e), GFP_KERNEL);
+    if (!e) return -ENOMEM;
+
+    e->nr = nr;
+    list_add(&e->list, &syscall_list);
+    return 0;
+}
 
 int add_uid(uid_t uid) {
     struct uid_entry *e;
 
-    list_for_each_entry(e, &uid_list, list) { //check non ottimizzato su presenza nella lista
+    list_for_each_entry(e, &uid_list, list) {
         if (e->uid == uid)
             return -EEXIST;
     }
 
     e = kmalloc(sizeof(*e), GFP_KERNEL);
-    if (!e)
-        return -ENOMEM;
+    if (!e) return -ENOMEM;
 
     e->uid = uid;
     list_add(&e->list, &uid_list);
@@ -97,8 +110,7 @@ int add_comm(const char *comm) {
     }
 
     e = kmalloc(sizeof(*e), GFP_KERNEL);
-    if (!e)
-        return -ENOMEM;
+    if (!e) return -ENOMEM;
 
     strncpy(e->comm, comm, TASK_COMM_LEN);
     e->comm[TASK_COMM_LEN - 1] = '\0';
@@ -110,6 +122,16 @@ int add_comm(const char *comm) {
 // ==============================
 // CHECK
 // ==============================
+
+int is_syscall_monitored(int nr) {
+    struct syscall_entry *e;
+
+    list_for_each_entry(e, &syscall_list, list) {
+        if (e->nr == nr)
+            return 1;
+    }
+    return 0;
+}
 
 int is_uid_monitored(uid_t uid) {
     struct uid_entry *e;
@@ -135,6 +157,19 @@ int is_comm_monitored(const char *comm) {
 // REMOVE
 // ==============================
 
+int remove_syscall(int nr) {
+    struct syscall_entry *e, *tmp;
+
+    list_for_each_entry_safe(e, tmp, &syscall_list, list) {
+        if (e->nr == nr) {
+            list_del(&e->list);
+            kfree(e);
+            return 0;
+        }
+    }
+    return -ENOENT;
+}
+
 int remove_uid(uid_t uid) {
     struct uid_entry *e, *tmp;
 
@@ -145,7 +180,6 @@ int remove_uid(uid_t uid) {
             return 0;
         }
     }
-
     return -ENOENT;
 }
 
@@ -159,6 +193,21 @@ int remove_comm(const char *comm) {
             return 0;
         }
     }
-
     return -ENOENT;
+}
+
+// ==============================
+// EMPTY CHECK
+// ==============================
+
+int is_syscall_list_empty(void) {
+    return list_empty(&syscall_list);
+}
+
+int is_uid_list_empty(void) {
+    return list_empty(&uid_list);
+}
+
+int is_comm_list_empty(void) {
+    return list_empty(&comm_list);
 }

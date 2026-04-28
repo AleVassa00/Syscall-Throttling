@@ -15,8 +15,9 @@ static struct class *dev_class = NULL;
 static struct device *dev_device = NULL;
 
 // ==============================
-// IOCTL HANDLER
+// IOCTL
 // ==============================
+
 static long device_ioctl(struct file *file,
                          unsigned int cmd,
                          unsigned long arg)
@@ -24,115 +25,113 @@ static long device_ioctl(struct file *file,
     if (_IOC_TYPE(cmd) != SC_MAGIC)
         return -EINVAL;
 
+    if (current_uid().val != 0)
+        return -EPERM;
+
     int value;
     char comm[TASK_COMM_LEN];
 
     switch (cmd) {
 
+    case IOCTL_ADD_SYSCALL:
+        return add_syscall((int)arg);
+
+    case IOCTL_REMOVE_SYSCALL:
+        return remove_syscall((int)arg);
+
     case IOCTL_ADD_UID:
-        value = (int)arg;
-        return add_uid((uid_t)value);
+        return add_uid((uid_t)arg);
 
     case IOCTL_ADD_COMM:
         if (copy_from_user(comm, (char __user *)arg, TASK_COMM_LEN))
             return -EFAULT;
-
         comm[TASK_COMM_LEN - 1] = '\0';
         return add_comm(comm);
 
     case IOCTL_REMOVE_UID:
-        value = (int)arg;
-        return remove_uid(value);
+        return remove_uid((uid_t)arg);
 
     case IOCTL_REMOVE_COMM:
         if (copy_from_user(comm, (char __user *)arg, TASK_COMM_LEN))
             return -EFAULT;
-
         comm[TASK_COMM_LEN - 1] = '\0';
         return remove_comm(comm);
 
     case IOCTL_SET_MAX:
-        value = (int)arg;
-        monitor_set_max(value);
+        monitor_set_max((int)arg);
         return 0;
 
     case IOCTL_ENABLE:
-        // 👉 controllo configurazione
-        if (is_uid_list_empty() && is_comm_list_empty())
+        if (is_syscall_list_empty() ||
+           (is_uid_list_empty() && is_comm_list_empty()))
             return -EINVAL;
 
         monitor_enable();
-
         return 0;
 
     case IOCTL_DISABLE:
         monitor_disable();
         return 0;
+
     default:
         return -EINVAL;
     }
 }
 
 // ==============================
-// FILE OPERATIONS
+// READ
+// ==============================
+
+static ssize_t device_read(struct file *file,
+                          char __user *buf,
+                          size_t len,
+                          loff_t *offset)
+{
+    char tmp[256];
+    int n;
+
+    if (*offset > 0)
+        return 0;
+
+    n = snprintf(tmp, sizeof(tmp),
+        "Monitor: %s\nPeak delay: %llu\nPeak blocked: %d\nAvg blocked: %llu\n",
+        monitor_is_enabled() ? "ON" : "OFF",
+        get_peak_delay(),
+        get_peak_blocked(),
+        get_avg_blocked()
+    );
+
+    if (copy_to_user(buf, tmp, n))
+        return -EFAULT;
+
+    *offset += n;
+    return n;
+}
+
 // ==============================
 
 static struct file_operations fops = {
     .owner = THIS_MODULE,
     .unlocked_ioctl = device_ioctl,
+    .read = device_read,
 };
 
-// ==============================
-// INIT
 // ==============================
 
 int device_init(void)
 {
-    // registra device
     major = register_chrdev(0, DEVICE_NAME, &fops);
-    if (major < 0) {
-        printk(KERN_ERR "Failed to register device\n");
-        return major;
-    }
 
-    // crea classe
     dev_class = class_create(DEVICE_NAME);
-    if (IS_ERR(dev_class)) {
-        printk(KERN_ERR "class_create failed: %ld\n", PTR_ERR(dev_class));
-        unregister_chrdev(major, DEVICE_NAME);
-        return PTR_ERR(dev_class);
-    }
-
-    // crea /dev entry
     dev_device = device_create(dev_class, NULL,
-                              MKDEV(major, 0),
-                              NULL,
+                              MKDEV(major, 0), NULL,
                               DEVICE_NAME);
-
-    if (IS_ERR(dev_device)) {
-        class_destroy(dev_class);
-        unregister_chrdev(major, DEVICE_NAME);
-        return PTR_ERR(dev_device);
-    }
-
-    printk(KERN_INFO "Device created: /dev/%s\n", DEVICE_NAME);
     return 0;
 }
 
-// ==============================
-// CLEANUP
-// ==============================
-
 void device_cleanup(void)
 {
-   if (dev_device){
-        device_destroy(dev_class, MKDEV(major, 0));
-   }
-
-    if (dev_class){
-        class_destroy(dev_class);
-    }
+    device_destroy(dev_class, MKDEV(major, 0));
+    class_destroy(dev_class);
     unregister_chrdev(major, DEVICE_NAME);
-
-    printk(KERN_INFO "Device removed\n");
 }

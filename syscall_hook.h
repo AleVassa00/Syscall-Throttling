@@ -10,7 +10,7 @@ extern unsigned long **sys_call_table;
 int resolve_syscall_table(void);
 
 // hook management
-int install_syscall_hooks(void);
-void uninstall_syscall_hooks(void);
+int install_all_hooks(void);
+void uninstall_all_hooks(void);
 
 #endif

@@ -2,13 +2,13 @@
 #include <linux/kernel.h>
 #include <linux/ftrace.h>
 #include <linux/kallsyms.h>
-#include <linux/slab.h>
 #include <linux/ptrace.h>
 #include <linux/sched.h>
 
 #include "syscall_hook.h"
 #include "monitor.h"
 #include "registry.h"
+#include "kprobe_helper.h"
 
 #define MODNAME "syscall_monitor"
 
@@ -55,14 +55,11 @@ static int install_ftrace_hook(struct ftrace_hook *hook)
                       FTRACE_OPS_FL_IPMODIFY;
 
     ret = ftrace_set_filter_ip(&hook->ops, hook->address, 0, 0);
-    if (ret) {
-        printk(KERN_WARNING "%s: filter failed %d\n", MODNAME, ret);
+    if (ret)
         return ret;
-    }
 
     ret = register_ftrace_function(&hook->ops);
     if (ret) {
-        printk(KERN_WARNING "%s: register failed %d\n", MODNAME, ret);
         ftrace_set_filter_ip(&hook->ops, hook->address, 1, 0);
         return ret;
     }
@@ -90,33 +87,51 @@ static asmlinkage long syscall_wrapper(const struct pt_regs *regs)
 {
     int nr = regs->orig_ax;
 
+    // sicurezza base
+    if (nr < 0 || nr >= hooks_count)
+        return -ENOSYS;
+
+    if (!hooks[nr].original)
+        return -ENOSYS;
+
     uid_t uid = current_uid().val;
     const char *comm = current->comm;
 
+    long (*original)(const struct pt_regs *);
+    original = (long (*)(const struct pt_regs *))hooks[nr].original;
+
+    // monitor OFF → bypass totale
     if (!monitor_is_enabled())
-        return ((long (*)(const struct pt_regs *))hooks[nr].original)(regs);
+        return original(regs);
 
+    // syscall non monitorata → bypass
+    if (!is_syscall_monitored(nr))
+        return original(regs);
+
+    // uid/comm non monitorati → bypass
     if (!is_uid_monitored(uid) && !is_comm_monitored(comm))
-        return ((long (*)(const struct pt_regs *))hooks[nr].original)(regs);
+        return original(regs);
 
+    // throttling
     if (monitor_should_throttle())
         monitor_block_current();
 
-    return ((long (*)(const struct pt_regs *))hooks[nr].original)(regs);
+    return original(regs);
 }
 
 // ==============================
 // INSTALL ALL HOOKS
 // ==============================
 
-
-
-
 int install_all_hooks(void)
 {
     int i;
 
+    unsigned long (*kallsyms_lookup_name_fn)(const char *name);
     kallsyms_lookup_name_fn = get_kallsyms_lookup_name_fn();
+
+    if (!kallsyms_lookup_name_fn)
+        return -1;
 
     sys_call_table = (unsigned long **)
         kallsyms_lookup_name_fn("sys_call_table");
@@ -131,6 +146,7 @@ int install_all_hooks(void)
     hooks = kmalloc_array(hooks_count,
                           sizeof(struct ftrace_hook),
                           GFP_KERNEL);
+
     if (!hooks)
         return -ENOMEM;
 
@@ -138,8 +154,10 @@ int install_all_hooks(void)
 
         unsigned long addr = (unsigned long)sys_call_table[i];
 
-        if (!addr)
+        if (!addr) {
+            hooks[i].address = 0;
             continue;
+        }
 
         hooks[i].address = addr;
         hooks[i].function = syscall_wrapper;
@@ -157,7 +175,7 @@ int install_all_hooks(void)
 }
 
 // ==============================
-// UNINSTALL ALL HOOKS
+// UNINSTALL
 // ==============================
 
 void uninstall_all_hooks(void)
