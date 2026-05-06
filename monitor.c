@@ -220,15 +220,10 @@ int should_block(int nr)
         return 0;
     }
 
-    /* DEBUG: stampa sempre cosa vede */
-    printk(KERN_INFO "[MONITOR] check: comm=%s dev=%u:%u ino=%lu nr=%d\n",
-           current->comm, MAJOR(dev), MINOR(dev), ino, nr);
 
     uid_match  = is_uid_monitored(uid);
     prog_match = is_prog_inode_monitored(dev, ino);
 
-    printk(KERN_INFO "[MONITOR] uid_match=%d prog_match=%d\n",
-           uid_match, prog_match);
 
     if (!uid_match && !prog_match)
         return 0;
