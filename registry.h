@@ -2,28 +2,28 @@
 #define REGISTRY_H
 
 #include <linux/types.h>
+#include <linux/cred.h>
+#include <linux/limits.h>
 
-int registry_init(void);
-void registry_cleanup(void);
+/* ================= UID ================= */
 
-// ADD
-int add_uid(uid_t uid);
-int add_comm(const char *comm);
+int add_user_id(int uid);
+int remove_user_id(int uid);
+int is_uid_monitored(kuid_t uid);
+
+/* ================= PROGRAM / EXECUTABLE INODE ================= */
+
+int add_prog_inode(const char *path);
+int remove_prog_inode(const char *path);
+int is_prog_inode_monitored(dev_t dev, unsigned long ino);
+
+/* ================= SYSCALL ================= */
+
 int add_syscall(int nr);
-
-// REMOVE
-int remove_uid(uid_t uid);
-int remove_comm(const char *comm);
 int remove_syscall(int nr);
-
-// CHECK
-int is_uid_monitored(uid_t uid);
-int is_comm_monitored(const char *comm);
 int is_syscall_monitored(int nr);
 
-// EMPTY CHECK
-int is_uid_list_empty(void);
-int is_comm_list_empty(void);
-int is_syscall_list_empty(void);
+int registry_add_syscall(int nr);
+int registry_remove_syscall(int nr);
 
 #endif

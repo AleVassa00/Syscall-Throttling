@@ -1,84 +1,65 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
 
+#include "probe.h"
 #include "syscall_hook.h"
 #include "device.h"
-#include "registry.h"
 #include "monitor.h"
-#include "stats.h"
 
-#define MODNAME "syscall_monitor"
+MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Manuel");
+MODULE_DESCRIPTION("Syscall throttling monitor");
 
-static int __init syscall_monitor_init(void) {
+static int __init mod_init(void)
+{
     int ret;
 
-    printk(KERN_INFO "%s: init\n", MODNAME);
+    printk(KERN_INFO "[MOD] loading syscall monitor\n");
+
     ret = resolve_kallsyms_lookup_name();
-    if (ret < 0){
+    if (ret < 0) {
+        printk(KERN_ERR "[MOD] failed to resolve kallsyms_lookup_name ret=%d\n", ret);
         return ret;
     }
 
-    // 2️⃣ Init registry (UID, programmi, syscall)
-    ret = registry_init();
-    if (ret < 0)
-        goto err_registry;
-
-    // 3️⃣ Init stats
-    /*ret = stats_init();
-    if (ret < 0)
-        goto err_stats;
-*/
-    // 4️⃣ Init monitor (throttling logic)
     ret = monitor_init();
-    if (ret < 0)
-        goto err_monitor;
+    if (ret < 0) {
+        printk(KERN_ERR "[MOD] monitor_init failed ret=%d\n", ret);
+        return ret;
+    }
 
-    // 5️⃣ Hook syscall
-    ret = install_all_hooks();
-    if (ret < 0)
-        goto err_hooks;
+    ret = syscall_hook_init();
+    if (ret < 0) {
+        printk(KERN_ERR "[MOD] syscall_hook_init failed ret=%d\n", ret);
+        monitor_cleanup();
+        return ret;
+    }
 
-    // 6️⃣ Create device (/dev/syscall_monitor)
     ret = device_init();
-    if (ret < 0)
-        goto err_device;
+    if (ret < 0) {
+        printk(KERN_ERR "[MOD] device_init failed ret=%d\n", ret);
+        syscall_hook_cleanup();
+        monitor_cleanup();
+        return ret;
+    }
 
-    // 7️⃣ Monitor OFF di default
-    monitor_disable();
+    printk(KERN_INFO "[MOD] module loaded successfully\n");
 
-    printk(KERN_INFO "%s: loaded successfully\n", MODNAME);
     return 0;
-
-err_device:
-    uninstall_all_hooks();
-err_hooks:
-    monitor_cleanup();
-err_monitor:
- //   stats_cleanup();
-//err_stats:
-    registry_cleanup();
-err_registry:
-    return ret;
 }
 
+static void __exit mod_exit(void)
+{
+    printk(KERN_INFO "[MOD] unloading syscall monitor\n");
 
-static void __exit syscall_monitor_exit(void) {
-
-    printk(KERN_INFO "%s: exit\n", MODNAME);
-
-    // ordine inverso rispetto init
     device_cleanup();
-    uninstall_all_hooks();
-    monitor_cleanup();
-  //  stats_cleanup();
-    registry_cleanup();
 
-    printk(KERN_INFO "%s: unloaded\n", MODNAME);
+    syscall_hook_cleanup();
+
+    monitor_cleanup();
+
+    printk(KERN_INFO "[MOD] module unloaded\n");
 }
 
-module_init(syscall_monitor_init);
-module_exit(syscall_monitor_exit);
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("AleVassa00");
-MODULE_DESCRIPTION("Syscall Throttling LKM");
+module_init(mod_init);
+module_exit(mod_exit);

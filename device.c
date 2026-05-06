@@ -1,137 +1,162 @@
-#include <linux/module.h>
-#include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/uaccess.h>
-#include <linux/device.h>
+#include <linux/miscdevice.h>
+#include <linux/cred.h>
+#include <linux/sched.h>
+#include <linux/limits.h>
 
 #include "device.h"
-#include "registry.h"
 #include "monitor.h"
+#include "registry.h"
 
-#define DEVICE_NAME "syscall_monitor"
+#define IOCTL_ADD_SYSCALL           _IOW('a', 1, int)
+#define IOCTL_REMOVE_SYSCALL        _IOW('a', 2, int)
 
-static int major;
-static struct class *dev_class = NULL;
-static struct device *dev_device = NULL;
+#define IOCTL_ADD_UID               _IOW('a', 3, int)
+#define IOCTL_REMOVE_UID            _IOW('a', 4, int)
 
-// ==============================
-// IOCTL
-// ==============================
+#define IOCTL_ADD_PROGRAM_NAME      _IOW('a', 5, char *)
+#define IOCTL_REMOVE_PROGRAM_NAME   _IOW('a', 6, char *)
+
+#define IOCTL_ENABLE_MONITOR        _IO('a', 7)
+#define IOCTL_DISABLE_MONITOR       _IO('a', 8)
+
+#define IOCTL_SET_MAX               _IOW('a', 9, int)
+
+static int get_int_from_user(unsigned long arg, int *value)
+{
+    if (copy_from_user(value, (int __user *)arg, sizeof(int)))
+        return -EFAULT;
+
+    return 0;
+}
+
+static int get_path_from_user(unsigned long arg, char *buf)
+{
+    long ret;
+
+    ret = strncpy_from_user(buf, (const char __user *)arg, PATH_MAX);
+
+    if (ret < 0)
+        return -EFAULT;
+
+    if (ret == 0)
+        return -EINVAL;
+
+    if (ret >= PATH_MAX)
+        return -ENAMETOOLONG;
+
+    buf[PATH_MAX - 1] = '\0';
+
+    return 0;
+}
+
+static int check_root(void)
+{
+    if (!uid_eq(current_euid(), GLOBAL_ROOT_UID))
+        return -EPERM;
+
+    return 0;
+}
 
 static long device_ioctl(struct file *file,
                          unsigned int cmd,
                          unsigned long arg)
 {
-    if (_IOC_TYPE(cmd) != SC_MAGIC)
-        return -EINVAL;
-
-    if (current_uid().val != 0)
-        return -EPERM;
-
     int value;
-    char comm[TASK_COMM_LEN];
+    char *prog_path;          // <- puntatore, non array
+    int ret;
+
+    ret = check_root();
+    if (ret)
+        return ret;
+
+    /* Alloca solo per i comandi che ne hanno bisogno */
+    prog_path = NULL;
+    if (cmd == IOCTL_ADD_PROGRAM_NAME || cmd == IOCTL_REMOVE_PROGRAM_NAME) {
+        prog_path = kmalloc(PATH_MAX, GFP_KERNEL);
+        if (!prog_path)
+            return -ENOMEM;
+    }
 
     switch (cmd) {
-
     case IOCTL_ADD_SYSCALL:
-        return add_syscall((int)arg);
-
+        ret = get_int_from_user(arg, &value);
+        if (!ret) ret = registry_add_syscall(value);
+        break;
     case IOCTL_REMOVE_SYSCALL:
-        return remove_syscall((int)arg);
-
+        ret = get_int_from_user(arg, &value);
+        if (!ret) ret = registry_remove_syscall(value);
+        break;
     case IOCTL_ADD_UID:
-        return add_uid((uid_t)arg);
-
-    case IOCTL_ADD_COMM:
-        if (copy_from_user(comm, (char __user *)arg, TASK_COMM_LEN))
-            return -EFAULT;
-        comm[TASK_COMM_LEN - 1] = '\0';
-        return add_comm(comm);
-
+        ret = get_int_from_user(arg, &value);
+        if (!ret) ret = add_user_id(value);
+        break;
     case IOCTL_REMOVE_UID:
-        return remove_uid((uid_t)arg);
-
-    case IOCTL_REMOVE_COMM:
-        if (copy_from_user(comm, (char __user *)arg, TASK_COMM_LEN))
-            return -EFAULT;
-        comm[TASK_COMM_LEN - 1] = '\0';
-        return remove_comm(comm);
-
+        ret = get_int_from_user(arg, &value);
+        if (!ret) ret = remove_user_id(value);
+        break;
+    case IOCTL_ADD_PROGRAM_NAME:
+        ret = get_path_from_user(arg, prog_path);
+        if (!ret) ret = add_prog_inode(prog_path);
+        break;
+    case IOCTL_REMOVE_PROGRAM_NAME:
+        ret = get_path_from_user(arg, prog_path);
+        if (!ret) ret = remove_prog_inode(prog_path);
+        break;
+    case IOCTL_ENABLE_MONITOR:
+        monitor_set_enabled(1);
+        ret = 0;
+        break;
+    case IOCTL_DISABLE_MONITOR:
+        monitor_set_enabled(0);
+        ret = 0;
+        break;
     case IOCTL_SET_MAX:
-        monitor_set_max((int)arg);
-        return 0;
-
-    case IOCTL_ENABLE:
-        if (is_syscall_list_empty() ||
-           (is_uid_list_empty() && is_comm_list_empty()))
-            return -EINVAL;
-
-        monitor_enable();
-        return 0;
-
-    case IOCTL_DISABLE:
-        monitor_disable();
-        return 0;
-
+        ret = get_int_from_user(arg, &value);
+        if (!ret) {
+            if (value <= 0) ret = -EINVAL;
+            else { monitor_set_max((unsigned long)value); ret = 0; }
+        }
+        break;
     default:
-        return -EINVAL;
+        ret = -EINVAL;
+        break;
     }
+
+    kfree(prog_path);   // safe anche se NULL
+    return ret;
 }
 
-// ==============================
-// READ
-// ==============================
-
-static ssize_t device_read(struct file *file,
-                          char __user *buf,
-                          size_t len,
-                          loff_t *offset)
-{
-    char tmp[256];
-    int n;
-
-    if (*offset > 0)
-        return 0;
-
-    n = snprintf(tmp, sizeof(tmp),
-        "Monitor: %s\nPeak delay: %llu\nPeak blocked: %d\nAvg blocked: %llu\n",
-        monitor_is_enabled() ? "ON" : "OFF",
-        get_peak_delay(),
-        get_peak_blocked(),
-        get_avg_blocked()
-    );
-
-    if (copy_to_user(buf, tmp, n))
-        return -EFAULT;
-
-    *offset += n;
-    return n;
-}
-
-// ==============================
-
-static struct file_operations fops = {
+static const struct file_operations fops = {
     .owner = THIS_MODULE,
     .unlocked_ioctl = device_ioctl,
-    .read = device_read,
 };
 
-// ==============================
+static struct miscdevice dev = {
+    .minor = MISC_DYNAMIC_MINOR,
+    .name = "syscall_monitor",
+    .fops = &fops,
+};
 
 int device_init(void)
 {
-    major = register_chrdev(0, DEVICE_NAME, &fops);
+    int ret;
 
-    dev_class = class_create(DEVICE_NAME);
-    dev_device = device_create(dev_class, NULL,
-                              MKDEV(major, 0), NULL,
-                              DEVICE_NAME);
+    ret = misc_register(&dev);
+    if (ret) {
+        printk(KERN_ERR "[DEVICE] misc_register failed ret=%d\n", ret);
+        return ret;
+    }
+
+    printk(KERN_INFO "[DEVICE] registered /dev/syscall_monitor\n");
+
     return 0;
 }
 
 void device_cleanup(void)
 {
-    device_destroy(dev_class, MKDEV(major, 0));
-    class_destroy(dev_class);
-    unregister_chrdev(major, DEVICE_NAME);
+    misc_deregister(&dev);
+
+    printk(KERN_INFO "[DEVICE] deregistered /dev/syscall_monitor\n");
 }
