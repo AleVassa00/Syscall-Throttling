@@ -1,42 +1,38 @@
 #include <linux/jiffies.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
-#include <linux/mutex.h>
 #include <linux/cred.h>
-#include <linux/hashtable.h>
-#include <linux/slab.h>
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/kdev_t.h>
 #include <linux/time.h>
+#include <linux/errno.h>
+#include <linux/rcupdate.h>
+#include <linux/wait.h>
+#include <linux/kernel.h>
+#include <linux/timer.h>
 
 #include "monitor.h"
 #include "registry.h"
 
 #define DEFAULT_MAX_CALLS 10
-#define MONITOR_HASH_BITS 6
+#define WINDOW_MS 10000
 
-struct counter {
-    kuid_t uid;
-
-    dev_t dev;
-    unsigned long ino;
-
-    int syscall_nr;
-
-    unsigned long count;
-    unsigned long window_start;
-
-    spinlock_t lock;
-    struct hlist_node node;
-};
-
-static DEFINE_HASHTABLE(counter_table, MONITOR_HASH_BITS);
-static DEFINE_MUTEX(table_mutex);
 
 static int monitor_enabled;
 static unsigned long max_calls = DEFAULT_MAX_CALLS;
 
+/* Contatore globale del monitor */
+static DEFINE_SPINLOCK(counter_lock);
+static unsigned long global_count;
+static unsigned long global_window_start;
+static unsigned long window_generation;
+
+/* Wait queue + timer finestra */
+static DECLARE_WAIT_QUEUE_HEAD(throttle_wq);
+static struct timer_list window_timer;
+
+/* Statistiche */
 static DEFINE_SPINLOCK(stats_lock);
 
 static unsigned long max_delay;
@@ -51,11 +47,6 @@ static int get_current_exe_inode(dev_t *dev, unsigned long *ino)
     if (!dev || !ino)
         return -EINVAL;
 
-    /*
-     * current->mm->exe_file è il campo diretto, accessibile
-     * senza bisogno di funzioni esportate.
-     * Protetto da rcu_read_lock come da documentazione kernel.
-     */
     rcu_read_lock();
 
     if (!current->mm || !current->mm->exe_file) {
@@ -75,95 +66,6 @@ static int get_current_exe_inode(dev_t *dev, unsigned long *ino)
     rcu_read_unlock();
 
     return 0;
-}
-
-static u32 counter_hash_key(kuid_t uid, dev_t dev, unsigned long ino, int nr)
-{
-    u32 key = 0;
-
-    key ^= __kuid_val(uid);
-    key ^= MAJOR(dev);
-    key ^= MINOR(dev);
-    key ^= (u32)ino;
-    key ^= (u32)nr;
-
-    return key;
-}
-
-static struct counter *find_counter(kuid_t uid,
-                                    dev_t dev,
-                                    unsigned long ino,
-                                    int nr)
-{
-    struct counter *c;
-    u32 key = counter_hash_key(uid, dev, ino, nr);
-
-    hash_for_each_possible(counter_table, c, node, key) {
-        if (uid_eq(c->uid, uid) &&
-            c->dev == dev &&
-            c->ino == ino &&
-            c->syscall_nr == nr) {
-            return c;
-        }
-    }
-
-    return NULL;
-}
-
-static struct counter *get_or_create_counter(kuid_t uid,
-                                             dev_t dev,
-                                             unsigned long ino,
-                                             int nr)
-{
-    struct counter *c;
-    u32 key = counter_hash_key(uid, dev, ino, nr);
-
-    mutex_lock(&table_mutex);
-
-    c = find_counter(uid, dev, ino, nr);
-    if (c) {
-        mutex_unlock(&table_mutex);
-        return c;
-    }
-
-    c = kzalloc(sizeof(*c), GFP_KERNEL);
-    if (!c) {
-        mutex_unlock(&table_mutex);
-        return NULL;
-    }
-
-    c->uid = uid;
-    c->dev = dev;
-    c->ino = ino;
-    c->syscall_nr = nr;
-    c->count = 0;
-    c->window_start = jiffies;
-
-    spin_lock_init(&c->lock);
-
-    hash_add(counter_table, &c->node, key);
-
-    mutex_unlock(&table_mutex);
-
-    return c;
-}
-
-void monitor_set_enabled(int val)
-{
-    monitor_enabled = val ? 1 : 0;
-
-    printk(KERN_INFO "[MONITOR] %s\n",
-           monitor_enabled ? "ENABLED" : "DISABLED");
-}
-
-void monitor_set_max(unsigned long val)
-{
-    if (val == 0)
-        return;
-
-    max_calls = val;
-
-    printk(KERN_INFO "[MONITOR] MAX set to %lu\n", max_calls);
 }
 
 static void stats_on_block_start(void)
@@ -196,13 +98,83 @@ static void stats_on_block_end(unsigned long delay)
     spin_unlock_irqrestore(&stats_lock, flags);
 }
 
+static void window_timer_callback(struct timer_list *t)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&counter_lock, flags);
+
+    global_count = 0;
+    global_window_start = jiffies;
+    window_generation++;
+
+    spin_unlock_irqrestore(&counter_lock, flags);
+
+    wake_up_all(&throttle_wq);
+}
+
+static int try_consume_slot(unsigned long *count_snapshot)
+{
+    unsigned long flags;
+    unsigned long now;
+    int allowed = 0;
+    int wake = 0;
+
+    spin_lock_irqsave(&counter_lock, flags);
+
+    now = jiffies;
+
+    if (time_after_eq(now, global_window_start + msecs_to_jiffies(WINDOW_MS))) {
+        global_count = 0;
+        global_window_start = now;
+        window_generation++;
+        wake = 1;
+    }
+
+    if (global_count < max_calls) {
+        global_count++;
+        allowed = 1;
+    } else {
+        mod_timer(&window_timer, global_window_start + msecs_to_jiffies(WINDOW_MS));
+    }
+
+    if (count_snapshot)
+        *count_snapshot = global_count;
+
+    spin_unlock_irqrestore(&counter_lock, flags);
+
+    if (wake)
+        wake_up_all(&throttle_wq);
+
+    return allowed;
+}
+
+void monitor_set_enabled(int val)
+{
+    monitor_enabled = val ? 1 : 0;
+
+    if (!monitor_enabled)
+        wake_up_all(&throttle_wq);
+
+    printk(KERN_INFO "[MONITOR] %s\n",
+           monitor_enabled ? "ENABLED" : "DISABLED");
+}
+
+void monitor_set_max(unsigned long val)
+{
+    if (val == 0)
+        return;
+
+    max_calls = val;
+
+    printk(KERN_INFO "[MONITOR] MAX set to %lu\n", max_calls);
+}
+
 int should_block(int nr)
 {
     kuid_t uid = current_euid();
     dev_t dev = 0;
     unsigned long ino = 0;
-    struct counter *c;
-    unsigned long now = jiffies;
     int ret;
     int uid_match;
     int prog_match;
@@ -220,75 +192,76 @@ int should_block(int nr)
         return 0;
     }
 
-
-    uid_match  = is_uid_monitored(uid);
+    uid_match = is_uid_monitored(uid);
     prog_match = is_prog_inode_monitored(dev, ino);
-
 
     if (!uid_match && !prog_match)
         return 0;
 
-    c = get_or_create_counter(uid, dev, ino, nr);
-    if (!c)
-        return 0;
-
-    spin_lock(&c->lock);
-
-    now = jiffies;
-
-    if (time_after(now, c->window_start + HZ)) {
-        c->count = 0;
-        c->window_start = now;
-    }
-
-    c->count++;
-
-    printk(KERN_INFO "[MONITOR] euid=%d prog=%s dev=%u:%u ino=%lu syscall=%d count=%lu max=%lu\n",
-           __kuid_val(uid),
-           current->comm,
-           MAJOR(dev),
-           MINOR(dev),
-           ino,
-           nr,
-           c->count,
-           max_calls);
-
-    if (c->count > max_calls) {
+    while (monitor_enabled) {
         unsigned long start;
         unsigned long delay;
+        unsigned long my_generation;
+        unsigned long local_count = 0;
 
-        spin_unlock(&c->lock);
+        if (try_consume_slot(&local_count)) {
+            printk(KERN_INFO "[MONITOR] allowed count=%lu max=%lu euid=%d prog=%s syscall=%d dev=%u:%u ino=%lu\n",
+                   local_count,
+                   max_calls,
+                   __kuid_val(uid),
+                   current->comm,
+                   nr,
+                   MAJOR(dev),
+                   MINOR(dev),
+                   ino);
 
-        printk(KERN_INFO "[THROTTLE] blocking euid=%d prog=%s syscall=%d\n",
-               __kuid_val(uid),
-               current->comm,
-               nr);
+            return 0;
+        }
 
         start = jiffies;
 
         stats_on_block_start();
 
-        set_current_state(TASK_INTERRUPTIBLE);
-        schedule_timeout(HZ / 2);
+        my_generation = window_generation;
+
+        printk(KERN_INFO
+       "[THROTTLE] pid=%d blocked_now=%lu peak=%lu count=%lu/%lu\n",
+       current->pid,
+       currently_blocked,
+       peak_blocked_threads,
+       local_count,
+       max_calls);
+        ret = wait_event_interruptible(throttle_wq,
+                               window_generation != my_generation ||
+                               !monitor_enabled);
 
         delay = jiffies - start;
 
         stats_on_block_end(delay);
 
-        return 1;
+        if (ret) {
+        printk(KERN_INFO
+           "[THROTTLE] interrupted by signal pid=%d prog=%s ret=%d\n",
+           current->pid,
+           current->comm,
+           ret);
+        return 0;
+        }
     }
-
-    spin_unlock(&c->lock);
 
     return 0;
 }
 
 int monitor_init(void)
 {
-    hash_init(counter_table);
-
     monitor_enabled = 0;
     max_calls = DEFAULT_MAX_CALLS;
+
+    global_count = 0;
+    global_window_start = jiffies;
+    window_generation = 0;
+
+    timer_setup(&window_timer, window_timer_callback, 0);
 
     max_delay = 0;
     blocked_threads_total = 0;
@@ -302,20 +275,11 @@ int monitor_init(void)
 
 void monitor_cleanup(void)
 {
-    int bkt;
-    struct counter *c;
-    struct hlist_node *tmp;
-
-    mutex_lock(&table_mutex);
-
-    hash_for_each_safe(counter_table, bkt, tmp, c, node) {
-        hash_del(&c->node);
-        kfree(c);
-    }
-
-    mutex_unlock(&table_mutex);
+    timer_delete_sync(&window_timer);
+    wake_up_all(&throttle_wq);
 
     printk(KERN_INFO "[MONITOR] cleanup\n");
+
     printk(KERN_INFO "[STATS] max_delay_jiffies=%lu blocked_total=%lu peak_blocked_threads=%lu\n",
            max_delay,
            blocked_threads_total,

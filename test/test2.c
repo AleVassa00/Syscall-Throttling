@@ -1,9 +1,12 @@
 #include <unistd.h>
+#include <stdlib.h>
 #include <sys/syscall.h>
 
-int main(void)
+int main(int argc, char **argv)
 {
-    while (1) {
+    int max= atoi(argv[1]);
+
+    for(int i=0; i<max; i++) {
         syscall(SYS_getpid);
     }
 }
