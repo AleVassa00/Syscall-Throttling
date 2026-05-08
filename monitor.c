@@ -113,6 +113,8 @@ static void window_timer_callback(struct timer_list *t)
     wake_up_all(&throttle_wq);
 }
 
+//funzione che stabilisce se c'è ancora spazio nella finestra corrente
+
 static int try_consume_slot(unsigned long *count_snapshot)
 {
     unsigned long flags;
@@ -124,12 +126,12 @@ static int try_consume_slot(unsigned long *count_snapshot)
 
     now = jiffies;
 
-    if (time_after_eq(now, global_window_start + msecs_to_jiffies(WINDOW_MS))) {
+    if (time_after_eq(now, global_window_start + msecs_to_jiffies(WINDOW_MS))) { 
         global_count = 0;
         global_window_start = now;
         window_generation++;
         wake = 1;
-    }
+    }//sto resettando il contatore globale e l'inizio della finestra
 
     if (global_count < max_calls) {
         global_count++;
@@ -151,15 +153,29 @@ static int try_consume_slot(unsigned long *count_snapshot)
 
 void monitor_set_enabled(int val)
 {
-    monitor_enabled = val ? 1 : 0;
+    unsigned long flags;
 
-    if (!monitor_enabled)
+    monitor_enabled = val;
+
+    if (monitor_enabled) {
+        spin_lock_irqsave(&counter_lock, flags);
+
+        global_count = 0;
+        global_window_start = jiffies;
+        window_generation++;
+
+        mod_timer(&window_timer,
+                  global_window_start + msecs_to_jiffies(WINDOW_MS));
+
+        spin_unlock_irqrestore(&counter_lock, flags);
+    } else {
+        timer_delete_sync(&window_timer);
         wake_up_all(&throttle_wq);
+    }
 
     printk(KERN_INFO "[MONITOR] %s\n",
            monitor_enabled ? "ENABLED" : "DISABLED");
 }
-
 void monitor_set_max(unsigned long val)
 {
     if (val == 0)
@@ -256,10 +272,6 @@ int monitor_init(void)
 {
     monitor_enabled = 0;
     max_calls = DEFAULT_MAX_CALLS;
-
-    global_count = 0;
-    global_window_start = jiffies;
-    window_generation = 0;
 
     timer_setup(&window_timer, window_timer_callback, 0);
 
