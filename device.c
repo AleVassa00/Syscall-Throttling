@@ -4,7 +4,9 @@
 #include <linux/cred.h>
 #include <linux/sched.h>
 #include <linux/limits.h>
+#include <linux/slab.h>
 
+#include "syscall_hook.h"
 #include "device.h"
 #include "monitor.h"
 #include "registry.h"
@@ -22,6 +24,7 @@
 #define IOCTL_DISABLE_MONITOR       _IO('a', 8)
 
 #define IOCTL_SET_MAX               _IOW('a', 9, int)
+
 
 static int get_int_from_user(unsigned long arg, int *value)
 {
@@ -59,74 +62,114 @@ static int check_root(void)
     return 0;
 }
 
-static long device_ioctl(struct file *file,
-                         unsigned int cmd,
-                         unsigned long arg)
+static int handle_program_ioctl(unsigned long arg, int add)
+{
+    char *prog_path;
+    int ret;
+
+    prog_path = kmalloc(PATH_MAX, GFP_KERNEL);
+    if (!prog_path)
+        return -ENOMEM;
+
+    ret = get_path_from_user(arg, prog_path);
+    if (!ret) {
+        if (add)
+            ret = add_prog_inode(prog_path);
+        else
+            ret = remove_prog_inode(prog_path);
+    }
+
+    kfree(prog_path);
+    return ret;
+}
+
+static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     int value;
-    char *prog_path;          // <- puntatore, non array
     int ret;
 
     ret = check_root();
-    if (ret)
+    if (ret){
         return ret;
-
-    /* Alloca solo per i comandi che ne hanno bisogno */
-    prog_path = NULL;
-    if (cmd == IOCTL_ADD_PROGRAM_NAME || cmd == IOCTL_REMOVE_PROGRAM_NAME) {
-        prog_path = kmalloc(PATH_MAX, GFP_KERNEL);
-        if (!prog_path)
-            return -ENOMEM;
     }
-
     switch (cmd) {
     case IOCTL_ADD_SYSCALL:
         ret = get_int_from_user(arg, &value);
-        if (!ret) ret = registry_add_syscall(value);
+        if (ret){
+            break;
+        }
+        ret = add_syscall(value);
+        if (ret){
+            break;
+        }
+        ret = add_syscall_hook(value);
+        if (ret) {
+            remove_syscall(value);
+            break;
+        }
         break;
     case IOCTL_REMOVE_SYSCALL:
         ret = get_int_from_user(arg, &value);
-        if (!ret) ret = registry_remove_syscall(value);
+        if (ret)
+            break;
+        ret = remove_syscall_hook(value);
+        if (ret)
+            break;
+        ret = remove_syscall(value);
+        if (ret){
+            printk(KERN_ERR "[DEVICE] remove_syscall failed after unhook ret=%d\n", ret);
+        }
         break;
     case IOCTL_ADD_UID:
         ret = get_int_from_user(arg, &value);
-        if (!ret) ret = add_user_id(value);
+        if (!ret)
+            ret = add_user_id(value);
         break;
+
     case IOCTL_REMOVE_UID:
         ret = get_int_from_user(arg, &value);
-        if (!ret) ret = remove_user_id(value);
+        if (!ret)
+            ret = remove_user_id(value);
         break;
+
     case IOCTL_ADD_PROGRAM_NAME:
-        ret = get_path_from_user(arg, prog_path);
-        if (!ret) ret = add_prog_inode(prog_path);
+        ret = handle_program_ioctl(arg, 1);
         break;
+
     case IOCTL_REMOVE_PROGRAM_NAME:
-        ret = get_path_from_user(arg, prog_path);
-        if (!ret) ret = remove_prog_inode(prog_path);
+        ret = handle_program_ioctl(arg, 0);
         break;
+
     case IOCTL_ENABLE_MONITOR:
         monitor_set_enabled(1);
         ret = 0;
         break;
+
     case IOCTL_DISABLE_MONITOR:
         monitor_set_enabled(0);
         ret = 0;
         break;
+
     case IOCTL_SET_MAX:
         ret = get_int_from_user(arg, &value);
         if (!ret) {
-            if (value <= 0) ret = -EINVAL;
-            else { monitor_set_max((unsigned long)value); ret = 0; }
+            if (value <= 0)
+                ret = -EINVAL;
+            else {
+                monitor_set_max((unsigned long)value);
+                ret = 0;
+            }
         }
         break;
+
     default:
         ret = -EINVAL;
         break;
     }
 
-    kfree(prog_path);   // safe anche se NULL
     return ret;
 }
+
 
 static const struct file_operations fops = {
     .owner = THIS_MODULE,
@@ -139,11 +182,19 @@ static struct miscdevice dev = {
     .fops = &fops,
 };
 
+
+
 int device_init(void)
 {
     int ret;
+    /*
+        * Misc device usato per esporre /dev/syscall_monitor.
+        * È sufficiente per il progetto perché il modulo necessita
+        * di un singolo character device dedicato alle ioctl di
+        * configurazione del monitor.
+    */
 
-    ret = misc_register(&dev);
+    ret = misc_register(&dev); 
     if (ret) {
         printk(KERN_ERR "[DEVICE] misc_register failed ret=%d\n", ret);
         return ret;

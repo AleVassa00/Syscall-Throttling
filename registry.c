@@ -8,13 +8,14 @@
 #include <linux/limits.h>
 #include <linux/kdev_t.h>
 #include <linux/rwlock.h>
+#include <linux/bitmap.h>
+#include <asm/unistd.h>
 
-#include "syscall_hook.h"
 #include "registry.h"
 
 #define MAX_UIDS      64
 #define MAX_PROGS     64
-#define MAX_SYSCALLS  512
+#define MAX_SYSCALLS  __NR_syscalls
 
 static DEFINE_RWLOCK(registry_lock);
 
@@ -239,31 +240,21 @@ int is_prog_inode_monitored(dev_t dev, unsigned long ino)
 
 /* ================= SYSCALL ================= */
 
-static int syscalls[MAX_SYSCALLS];
-static int syscall_count;
+static DECLARE_BITMAP(monitored_syscalls, MAX_SYSCALLS);
 
 int add_syscall(int nr)
 {
-    int i;
-
     if (nr < 0 || nr >= MAX_SYSCALLS)
         return -EINVAL;
 
     write_lock(&registry_lock);
 
-    for (i = 0; i < syscall_count; i++) {
-        if (syscalls[i] == nr) {
-            write_unlock(&registry_lock);
-            return -EEXIST;
-        }
-    }
-
-    if (syscall_count >= MAX_SYSCALLS) {
+    if (test_bit(nr, monitored_syscalls)) {
         write_unlock(&registry_lock);
-        return -ENOMEM;
+        return -EEXIST;
     }
 
-    syscalls[syscall_count++] = nr;
+    set_bit(nr, monitored_syscalls);
 
     write_unlock(&registry_lock);
 
@@ -274,71 +265,37 @@ int add_syscall(int nr)
 
 int remove_syscall(int nr)
 {
-    int i;
+    if (nr < 0 || nr >= MAX_SYSCALLS)
+        return -EINVAL;
 
     write_lock(&registry_lock);
 
-    for (i = 0; i < syscall_count; i++) {
-        if (syscalls[i] == nr) {
-            syscalls[i] = syscalls[syscall_count - 1];
-            syscall_count--;
-
-            write_unlock(&registry_lock);
-
-            printk(KERN_INFO "[REGISTRY] removed syscall %d\n", nr);
-
-            return 0;
-        }
+    if (!test_bit(nr, monitored_syscalls)) {
+        write_unlock(&registry_lock);
+        return -ENOENT;
     }
+
+    clear_bit(nr, monitored_syscalls);
 
     write_unlock(&registry_lock);
 
-    return -ENOENT;
-}
-
-int is_syscall_monitored(int nr)
-{
-    int i;
-    int ret = 0;
-
-    read_lock(&registry_lock);
-
-    for (i = 0; i < syscall_count; i++) {
-        if (syscalls[i] == nr) {
-            ret = 1;
-            break;
-        }
-    }
-
-    read_unlock(&registry_lock);
-
-    return ret;
-}
-
-int registry_add_syscall(int nr)
-{
-    int ret;
-
-    ret = add_syscall(nr);
-    if (ret)
-        return ret;
-
-    ret = add_syscall_hook(nr);
-    if (ret) {
-        remove_syscall(nr);
-        return ret;
-    }
+    printk(KERN_INFO "[REGISTRY] removed syscall %d\n", nr);
 
     return 0;
 }
 
-int registry_remove_syscall(int nr)
+int is_syscall_monitored(int nr)
 {
     int ret;
 
-    ret = remove_syscall_hook(nr);
-    if (ret)
-        return ret;
+    if (nr < 0 || nr >= MAX_SYSCALLS)
+        return 0;
 
-    return remove_syscall(nr);
+    read_lock(&registry_lock);
+
+    ret = test_bit(nr, monitored_syscalls);
+
+    read_unlock(&registry_lock);
+
+    return ret;
 }

@@ -268,13 +268,16 @@ int should_block(int nr)
     return 0;
 }
 
+//inizializzazione monitor e timer della finestra;
+
 int monitor_init(void)
 {
     monitor_enabled = 0;
-    max_calls = DEFAULT_MAX_CALLS;
+    max_calls = DEFAULT_MAX_CALLS; // modificabile da confiiguratore
 
-    timer_setup(&window_timer, window_timer_callback, 0);
+    timer_setup(&window_timer, window_timer_callback, 0); 
 
+    //ridondante
     max_delay = 0;
     blocked_threads_total = 0;
     currently_blocked = 0;

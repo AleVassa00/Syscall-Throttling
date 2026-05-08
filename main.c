@@ -16,26 +16,26 @@ static int __init mod_init(void)
 
     printk(KERN_INFO "[MOD] loading syscall monitor\n");
 
-    ret = resolve_kallsyms_lookup_name();
+    ret = resolve_kallsyms_lookup_name(); //ok
     if (ret < 0) {
         printk(KERN_ERR "[MOD] failed to resolve kallsyms_lookup_name ret=%d\n", ret);
         return ret;
     }
 
-    ret = monitor_init();
+    ret = monitor_init(); //ok
     if (ret < 0) {
         printk(KERN_ERR "[MOD] monitor_init failed ret=%d\n", ret);
         return ret;
     }
 
-    ret = syscall_hook_init();
+    ret = syscall_hook_init(); // ok
     if (ret < 0) {
         printk(KERN_ERR "[MOD] syscall_hook_init failed ret=%d\n", ret);
         monitor_cleanup();
         return ret;
     }
 
-    ret = device_init();
+    ret = device_init(); //
     if (ret < 0) {
         printk(KERN_ERR "[MOD] device_init failed ret=%d\n", ret);
         syscall_hook_cleanup();

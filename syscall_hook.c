@@ -17,9 +17,11 @@
 #include "probe.h"
 #include "monitor.h"
 
+#include <asm/unistd.h>
+
 #define MODNAME        "SYSCALL_MONITOR"
-#define MAX_HOOKS      512
-#define MAX_SYSCALL_NR 512
+#define MAX_HOOKS      __NR_syscalls
+#define MAX_SYSCALL_NR __NR_syscalls
 #define INST_LEN       5
 
 struct syscall_hook {
@@ -195,28 +197,18 @@ static asmlinkage long generic_syscall_hook(const struct pt_regs *regs)
 static int patch_x64_sys_call(void)
 {
     int offset;
-    struct kprobe kp = {
-        .symbol_name = "x64_sys_call",
-    };
 
     if (x64_sys_call_patched)
         return 0;
 
-    if (register_kprobe(&kp)) {
-        printk(KERN_ERR "%s: cannot resolve x64_sys_call\n", MODNAME);
-        return -ENOENT;
-    }
-
-    x64_sys_call_addr = (unsigned long)kp.addr;
-
-    unregister_kprobe(&kp);
-
+    x64_sys_call_addr = get_symbol_addr("x64_sys_call");
     if (!x64_sys_call_addr) {
-        printk(KERN_ERR "%s: x64_sys_call address is NULL\n", MODNAME);
+        printk(KERN_ERR "%s: cannot resolve x64_sys_call\n",
+               MODNAME);
         return -ENOENT;
     }
 
-    memcpy(original_inst, (void *)x64_sys_call_addr, INST_LEN);
+    memcpy(original_inst, (void *)x64_sys_call_addr, INST_LEN); //backup per cleanup
 
     jump_inst[0] = 0xE9;
 
@@ -268,7 +260,7 @@ int syscall_hook_init(void)
     hook_count = 0;
     sys_call_table = NULL;
     x64_sys_call_addr = 0;
-    x64_sys_call_patched = 0;
+    x64_sys_call_patched = 0; //booleano
 
     sys_call_table = (unsigned long **)get_symbol_addr("sys_call_table");
     if (!sys_call_table) {
@@ -279,11 +271,8 @@ int syscall_hook_init(void)
     printk(KERN_INFO "%s: sys_call_table at %px\n",
            MODNAME, sys_call_table);
 
-    /*
-     * Fondamentale sui kernel moderni:
-     * forza x64_sys_call a usare sys_call_table.
-     */
-    ret = patch_x64_sys_call();
+    // forzatura a usare syscall table
+    ret = patch_x64_sys_call(); //
     if (ret) {
         printk(KERN_ERR "%s: patch_x64_sys_call failed ret=%d\n",
                MODNAME, ret);
