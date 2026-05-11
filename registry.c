@@ -9,6 +9,8 @@
 #include <linux/kdev_t.h>
 #include <linux/rwlock.h>
 #include <linux/bitmap.h>
+#include <linux/hashtable.h>
+#include <linux/jhash.h>
 #include <asm/unistd.h>
 
 #include "registry.h"
@@ -17,34 +19,120 @@
 #define MAX_PROGS     64
 #define MAX_SYSCALLS  __NR_syscalls
 
-static DEFINE_RWLOCK(registry_lock);
+static DEFINE_RWLOCK(registry_syscall_lock);
+static DEFINE_RWLOCK(registry_path_lock);
+static DEFINE_RWLOCK(registry_uid_lock);
+
+
+ /* =============== REGISTRY ============= */
+
+static DECLARE_BITMAP(monitored_syscalls, MAX_SYSCALLS);
+
+#define UID_HASH_BITS   4
+#define PROG_HASH_BITS  5
+
+static DEFINE_HASHTABLE(progs_table, PROG_HASH_BITS);
+static DEFINE_HASHTABLE(uid_table, UID_HASH_BITS);
+
+
+/* ================ STRUCT =============== */
+
+struct monitored_uid {
+    kuid_t uid;
+    struct hlist_node node;
+};
+
+struct monitored_prog {
+    dev_t dev;
+    unsigned long ino;
+    struct hlist_node node;
+};
+
+/* ================ COUNTER ============== */
+
+static int uid_count; 
+static int prog_count;
+
+/* ================ HASH_KEY ============= */
+
+static u32 uid_hash_key(kuid_t uid)
+{
+    return __kuid_val(uid);
+}
+
+static u32 prog_hash_key(dev_t dev, unsigned long ino)
+{
+    u32 key = 0;
+
+    key ^= MAJOR(dev);
+    key ^= MINOR(dev);
+    key ^= (u32)ino;
+    key ^= (u32)(ino >> 32);
+
+    return key;
+}
+
+
+static struct monitored_uid *find_uid_nolock(kuid_t uid)
+{
+    struct monitored_uid *entry;
+    u32 key = uid_hash_key(uid);
+
+    hash_for_each_possible(uid_table, entry, node, key) {
+        if (uid_eq(entry->uid, uid))
+            return entry;
+    }
+
+    return NULL;
+}
+
+static struct monitored_prog *find_prog_nolock(dev_t dev, unsigned long ino)
+{
+    struct monitored_prog *entry;
+    u32 key = prog_hash_key(dev, ino);
+
+    hash_for_each_possible(progs_table, entry, node, key) {
+        if (entry->dev == dev && entry->ino == ino)
+            return entry;
+    }
+
+    return NULL;
+}
 
 /* ================= UID ================= */
 
-static kuid_t uids[MAX_UIDS];
-static int uid_count;
 
 int add_user_id(int uid)
 {
-    int i;
+    struct monitored_uid *entry;
+    kuid_t kuid = KUIDT_INIT(uid);
+    u32 key;
 
-    write_lock(&registry_lock);
+    write_lock(&registry_uid_lock);
 
-    for (i = 0; i < uid_count; i++) {
-        if (__kuid_val(uids[i]) == uid) {
-            write_unlock(&registry_lock);
-            return -EEXIST;
-        }
+    if (find_uid_nolock(kuid)) {
+        write_unlock(&registry_uid_lock);
+        return -EEXIST;
     }
 
     if (uid_count >= MAX_UIDS) {
-        write_unlock(&registry_lock);
+        write_unlock(&registry_uid_lock);
         return -ENOMEM;
     }
 
-    uids[uid_count++] = KUIDT_INIT(uid);
+    entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+    if (!entry) {
+        write_unlock(&registry_uid_lock);
+        return -ENOMEM;
+    }
 
-    write_unlock(&registry_lock);
+    entry->uid = kuid;
+    key = uid_hash_key(kuid);
+
+    hash_add(uid_table, &entry->node, key);
+    uid_count++;
+
+    write_unlock(&registry_uid_lock);
 
     printk(KERN_INFO "[REGISTRY] added UID %d\n", uid);
 
@@ -53,16 +141,20 @@ int add_user_id(int uid)
 
 int remove_user_id(int uid)
 {
-    int i;
+    struct monitored_uid *entry;
+    struct hlist_node *tmp;
+    kuid_t kuid = KUIDT_INIT(uid);
+    u32 key = uid_hash_key(kuid);
 
-    write_lock(&registry_lock);
+    write_lock(&registry_uid_lock);
 
-    for (i = 0; i < uid_count; i++) {
-        if (__kuid_val(uids[i]) == uid) {
-            uids[i] = uids[uid_count - 1];
+    hash_for_each_possible_safe(uid_table, entry, tmp, node, key) {
+        if (uid_eq(entry->uid, kuid)) {
+            hash_del(&entry->node);
+            kfree(entry);
             uid_count--;
 
-            write_unlock(&registry_lock);
+            write_unlock(&registry_uid_lock);
 
             printk(KERN_INFO "[REGISTRY] removed UID %d\n", uid);
 
@@ -70,41 +162,26 @@ int remove_user_id(int uid)
         }
     }
 
-    write_unlock(&registry_lock);
+    write_unlock(&registry_uid_lock);
 
     return -ENOENT;
 }
 
 int is_uid_monitored(kuid_t uid)
 {
-    int i;
-    int ret = 0;
+    int ret;
 
-    read_lock(&registry_lock);
+    read_lock(&registry_uid_lock);
 
-    for (i = 0; i < uid_count; i++) {
-        if (uid_eq(uids[i], uid)) {
-            ret = 1;
-            break;
-        }
-    }
+    ret = find_uid_nolock(uid) ? 1 : 0;
 
-    read_unlock(&registry_lock);
+    read_unlock(&registry_uid_lock);
 
     return ret;
 }
 
+
 /* ================= PROGRAM INODE ================= */
-
-struct monitored_prog {
-    char path[PATH_MAX];
-
-    dev_t dev;
-    unsigned long ino;
-};
-
-static struct monitored_prog progs[MAX_PROGS];
-static int prog_count;
 
 static int resolve_path_inode(const char *prog_path, dev_t *dev, unsigned long *ino)
 {
@@ -136,12 +213,15 @@ static int resolve_path_inode(const char *prog_path, dev_t *dev, unsigned long *
     return 0;
 }
 
+
+
 int add_prog_inode(const char *prog_path)
 {
-    int i;
     int ret;
     dev_t dev;
     unsigned long ino;
+    struct monitored_prog *entry;
+    u32 key;
 
     if (!prog_path)
         return -EINVAL;
@@ -150,43 +230,47 @@ int add_prog_inode(const char *prog_path)
     if (ret)
         return ret;
 
-    write_lock(&registry_lock);
+    write_lock(&registry_path_lock);
 
-    for (i = 0; i < prog_count; i++) {
-        if (progs[i].dev == dev && progs[i].ino == ino) {
-            write_unlock(&registry_lock);
-            return -EEXIST;
-        }
+    if (find_prog_nolock(dev, ino)) {
+        write_unlock(&registry_path_lock);
+        return -EEXIST;
     }
 
     if (prog_count >= MAX_PROGS) {
-        write_unlock(&registry_lock);
+        write_unlock(&registry_path_lock);
         return -ENOMEM;
     }
 
-    strscpy(progs[prog_count].path, prog_path, PATH_MAX);
-    progs[prog_count].dev = dev;
-    progs[prog_count].ino = ino;
+    entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+    if (!entry) {
+        write_unlock(&registry_path_lock);
+        return -ENOMEM;
+    }
 
+    entry->dev = dev;
+    entry->ino = ino;
+    key = prog_hash_key(dev, ino);
+
+    hash_add(progs_table, &entry->node, key);
     prog_count++;
 
-    write_unlock(&registry_lock);
+    write_unlock(&registry_path_lock);
 
-    printk(KERN_INFO "[REGISTRY] added program path=%s dev=%u:%u ino=%lu\n",
-           prog_path,
-           MAJOR(dev),
-           MINOR(dev),
-           ino);
+    printk(KERN_INFO "[REGISTRY] added program dev=%u:%u ino=%lu\n",
+           MAJOR(dev), MINOR(dev), ino);
 
     return 0;
 }
 
 int remove_prog_inode(const char *prog_path)
 {
-    int i;
     int ret;
     dev_t dev;
     unsigned long ino;
+    struct monitored_prog *entry;
+    struct hlist_node *tmp;
+    u32 key;
 
     if (!prog_path)
         return -EINVAL;
@@ -195,68 +279,61 @@ int remove_prog_inode(const char *prog_path)
     if (ret)
         return ret;
 
-    write_lock(&registry_lock);
+    key = prog_hash_key(dev, ino);
 
-    for (i = 0; i < prog_count; i++) {
-        if (progs[i].dev == dev && progs[i].ino == ino) {
-            printk(KERN_INFO "[REGISTRY] removed program path=%s dev=%u:%u ino=%lu\n",
-                   progs[i].path,
-                   MAJOR(progs[i].dev),
-                   MINOR(progs[i].dev),
-                   progs[i].ino);
+    write_lock(&registry_path_lock);
 
-            progs[i] = progs[prog_count - 1];
+    hash_for_each_possible_safe(progs_table, entry, tmp, node, key) {
+        if (entry->dev == dev && entry->ino == ino) {
+            printk(KERN_INFO "[REGISTRY] removed program dev=%u:%u ino=%lu\n",
+                   MAJOR(entry->dev), MINOR(entry->dev), entry->ino);
+
+            hash_del(&entry->node);
+            kfree(entry);
             prog_count--;
 
-            write_unlock(&registry_lock);
+            write_unlock(&registry_path_lock);
 
             return 0;
         }
     }
 
-    write_unlock(&registry_lock);
+    write_unlock(&registry_path_lock);
 
     return -ENOENT;
 }
 
 int is_prog_inode_monitored(dev_t dev, unsigned long ino)
 {
-    int i;
-    int ret = 0;
+    int ret;
 
-    read_lock(&registry_lock);
+    read_lock(&registry_path_lock);
 
-    for (i = 0; i < prog_count; i++) {
-        if (progs[i].dev == dev && progs[i].ino == ino) {
-            ret = 1;
-            break;
-        }
-    }
+    ret = find_prog_nolock(dev, ino) ? 1 : 0;
 
-    read_unlock(&registry_lock);
+    read_unlock(&registry_path_lock);
 
     return ret;
 }
 
 /* ================= SYSCALL ================= */
 
-static DECLARE_BITMAP(monitored_syscalls, MAX_SYSCALLS);
 
 int add_syscall(int nr)
 {
     if (nr < 0 || nr >= MAX_SYSCALLS)
         return -EINVAL;
 
-    write_lock(&registry_lock);
+    write_lock(&registry_syscall_lock);
 
     if (test_bit(nr, monitored_syscalls)) {
-        write_unlock(&registry_lock);
+        write_unlock(&registry_syscall_lock);
         return -EEXIST;
     }
 
     set_bit(nr, monitored_syscalls);
 
-    write_unlock(&registry_lock);
+    write_unlock(&registry_syscall_lock);
 
     printk(KERN_INFO "[REGISTRY] added syscall %d\n", nr);
 
@@ -268,16 +345,16 @@ int remove_syscall(int nr)
     if (nr < 0 || nr >= MAX_SYSCALLS)
         return -EINVAL;
 
-    write_lock(&registry_lock);
+    write_lock(&registry_syscall_lock);
 
     if (!test_bit(nr, monitored_syscalls)) {
-        write_unlock(&registry_lock);
+        write_unlock(&registry_syscall_lock);
         return -ENOENT;
     }
 
     clear_bit(nr, monitored_syscalls);
 
-    write_unlock(&registry_lock);
+    write_unlock(&registry_syscall_lock);
 
     printk(KERN_INFO "[REGISTRY] removed syscall %d\n", nr);
 
@@ -291,11 +368,40 @@ int is_syscall_monitored(int nr)
     if (nr < 0 || nr >= MAX_SYSCALLS)
         return 0;
 
-    read_lock(&registry_lock);
+    read_lock(&registry_syscall_lock);
 
     ret = test_bit(nr, monitored_syscalls);
 
-    read_unlock(&registry_lock);
+    read_unlock(&registry_syscall_lock);
 
     return ret;
+}
+void registry_cleanup(void)
+{
+    int bkt;
+    struct monitored_uid *u;
+    struct monitored_prog *p;
+    struct hlist_node *tmp;
+
+    write_lock(&registry_uid_lock);
+
+    hash_for_each_safe(uid_table, bkt, tmp, u, node) {
+        hash_del(&u->node);
+        kfree(u);
+    }
+
+    uid_count = 0;
+
+    write_unlock(&registry_uid_lock);
+
+    write_lock(&registry_path_lock);
+
+    hash_for_each_safe(progs_table, bkt, tmp, p, node) {
+        hash_del(&p->node);
+        kfree(p);
+    }
+
+    prog_count = 0;
+
+    write_unlock(&registry_path_lock);
 }

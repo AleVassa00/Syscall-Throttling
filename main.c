@@ -5,6 +5,7 @@
 #include "syscall_hook.h"
 #include "device.h"
 #include "monitor.h"
+#include "registry.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Manuel");
@@ -35,7 +36,7 @@ static int __init mod_init(void)
         return ret;
     }
 
-    ret = device_init(); //
+    ret = device_init(); //ok
     if (ret < 0) {
         printk(KERN_ERR "[MOD] device_init failed ret=%d\n", ret);
         syscall_hook_cleanup();
@@ -57,6 +58,8 @@ static void __exit mod_exit(void)
     syscall_hook_cleanup();
 
     monitor_cleanup();
+
+    registry_cleanup();
 
     printk(KERN_INFO "[MOD] module unloaded\n");
 }
