@@ -11,6 +11,8 @@ load:
 	sudo insmod syscall_monitor.ko
 remove: 
 	sudo rmmod syscall_monitor
+complete:
+	make clean && make && make load 
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(PWD) clean

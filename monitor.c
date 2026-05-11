@@ -19,7 +19,7 @@
 #define WINDOW_MS 10000
 
 
-static int monitor_enabled;
+static bool monitor_enabled;
 static unsigned long max_calls = DEFAULT_MAX_CALLS;
 
 /* Contatore globale del monitor */
@@ -133,7 +133,7 @@ static int try_consume_slot(unsigned long *count_snapshot)
         wake = 1;
     }//sto resettando il contatore globale e l'inizio della finestra
 
-    if (global_count < max_calls) {
+    if (global_count < READ_ONCE(max_calls)) {
         global_count++;
         allowed = 1;
     } else {
@@ -154,10 +154,11 @@ static int try_consume_slot(unsigned long *count_snapshot)
 void monitor_set_enabled(int val)
 {
     unsigned long flags;
+    bool enabled = val ? true : false;
 
-    monitor_enabled = val;
+    WRITE_ONCE(monitor_enabled, enabled);
 
-    if (monitor_enabled) {
+    if (enabled) {
         spin_lock_irqsave(&counter_lock, flags);
 
         global_count = 0;
@@ -174,17 +175,20 @@ void monitor_set_enabled(int val)
     }
 
     printk(KERN_INFO "[MONITOR] %s\n",
-           monitor_enabled ? "ENABLED" : "DISABLED");
+           enabled ? "ENABLED" : "DISABLED");
 }
+
+
 void monitor_set_max(unsigned long val)
 {
     if (val == 0)
         return;
 
-    max_calls = val;
+    WRITE_ONCE(max_calls, val);
 
-    printk(KERN_INFO "[MONITOR] MAX set to %lu\n", max_calls);
+    printk(KERN_INFO "[MONITOR] MAX set to %lu\n", val);
 }
+
 
 int should_block(int nr)
 {
@@ -195,8 +199,9 @@ int should_block(int nr)
     int uid_match;
     int prog_match;
 
-    if (!monitor_enabled)
+    if (!READ_ONCE(monitor_enabled)){
         return 0;
+    }
 
     if (!is_syscall_monitored(nr))
         return 0;
@@ -214,16 +219,17 @@ int should_block(int nr)
     if (!uid_match && !prog_match)
         return 0;
 
-    while (monitor_enabled) {
+    while (READ_ONCE(monitor_enabled)) {
         unsigned long start;
         unsigned long delay;
         unsigned long my_generation;
         unsigned long local_count = 0;
+        unsigned long local_max = READ_ONCE(max_calls);
 
         if (try_consume_slot(&local_count)) {
             printk(KERN_INFO "[MONITOR] allowed count=%lu max=%lu euid=%d prog=%s syscall=%d dev=%u:%u ino=%lu\n",
                    local_count,
-                   max_calls,
+                   local_max,
                    __kuid_val(uid),
                    current->comm,
                    nr,
@@ -246,11 +252,10 @@ int should_block(int nr)
        currently_blocked,
        peak_blocked_threads,
        local_count,
-       max_calls);
+       local_max);
         ret = wait_event_interruptible(throttle_wq,
                                window_generation != my_generation ||
-                               !monitor_enabled);
-
+                               !READ_ONCE(monitor_enabled));
         delay = jiffies - start;
 
         stats_on_block_end(delay);
@@ -272,18 +277,22 @@ int should_block(int nr)
 
 int monitor_init(void)
 {
-    monitor_enabled = 0;
-    max_calls = DEFAULT_MAX_CALLS; // modificabile da confiiguratore
+    WRITE_ONCE(monitor_enabled, false);
+    WRITE_ONCE(max_calls, DEFAULT_MAX_CALLS);
 
-    timer_setup(&window_timer, window_timer_callback, 0); 
+    global_count = 0;
+    global_window_start = 0;
+    window_generation = 0;
 
-    //ridondante
+    timer_setup(&window_timer, window_timer_callback, 0);
+
     max_delay = 0;
     blocked_threads_total = 0;
     currently_blocked = 0;
     peak_blocked_threads = 0;
 
-    printk(KERN_INFO "[MONITOR] initialized default OFF max=%lu\n", max_calls);
+    printk(KERN_INFO "[MONITOR] initialized default OFF max=%lu\n",
+           READ_ONCE(max_calls));
 
     return 0;
 }
