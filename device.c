@@ -10,6 +10,7 @@
 #include "device.h"
 #include "monitor.h"
 #include "registry.h"
+#include "stats.h"
 
 #define IOCTL_ADD_SYSCALL           _IOW('a', 1, int)
 #define IOCTL_REMOVE_SYSCALL        _IOW('a', 2, int)
@@ -25,6 +26,7 @@
 
 #define IOCTL_SET_MAX               _IOW('a', 9, int)
 
+#define IOCTL_GET_STATS             _IOR('a', 10, struct monitor_stats)
 
 static int get_int_from_user(unsigned long arg, int *value)
 {
@@ -161,11 +163,19 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             }
         }
         break;
+    case IOCTL_GET_STATS:
 
-    default:
-        ret = -EINVAL;
-        break;
-    }
+    struct monitor_stats stats;
+
+    stats_get(&stats);
+
+    if (copy_to_user((void __user *)arg, &stats, sizeof(stats)))
+        ret = -EFAULT;
+    else
+        ret = 0;
+
+    break;
+}
 
     return ret;
 }

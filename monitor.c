@@ -1,44 +1,34 @@
-#include <linux/jiffies.h>
 #include <linux/sched.h>
 #include <linux/spinlock.h>
 #include <linux/cred.h>
 #include <linux/fs.h>
 #include <linux/file.h>
 #include <linux/kdev_t.h>
-#include <linux/time.h>
 #include <linux/errno.h>
 #include <linux/rcupdate.h>
 #include <linux/wait.h>
 #include <linux/kernel.h>
-#include <linux/timer.h>
+#include <linux/hrtimer.h>
+#include <linux/ktime.h>
 
 #include "monitor.h"
 #include "registry.h"
+#include "stats.h"
 
 #define DEFAULT_MAX_CALLS 10
 #define WINDOW_MS 1000
 
-
 static bool monitor_enabled;
 static unsigned long max_calls = DEFAULT_MAX_CALLS;
 
-/* Contatore globale del monitor */
+/* Global monitor counter */
 static DEFINE_SPINLOCK(counter_lock);
 static unsigned long global_count;
-static unsigned long global_window_start;
 static unsigned long window_generation;
 
-/* Wait queue + timer finestra */
+/* Wait queue + high-resolution timer */
 static DECLARE_WAIT_QUEUE_HEAD(throttle_wq);
-static struct timer_list window_timer;
-
-/* Statistiche */
-static DEFINE_SPINLOCK(stats_lock);
-
-static unsigned long max_delay;
-static unsigned long blocked_threads_total;
-static unsigned long currently_blocked;
-static unsigned long peak_blocked_threads;
+static struct hrtimer window_timer;
 
 static int get_current_exe_inode(dev_t *dev, unsigned long *ino)
 {
@@ -68,37 +58,7 @@ static int get_current_exe_inode(dev_t *dev, unsigned long *ino)
     return 0;
 }
 
-static void stats_on_block_start(void)
-{
-    unsigned long flags;
-
-    spin_lock_irqsave(&stats_lock, flags);
-
-    blocked_threads_total++;
-    currently_blocked++;
-
-    if (currently_blocked > peak_blocked_threads)
-        peak_blocked_threads = currently_blocked;
-
-    spin_unlock_irqrestore(&stats_lock, flags);
-}
-
-static void stats_on_block_end(unsigned long delay)
-{
-    unsigned long flags;
-
-    spin_lock_irqsave(&stats_lock, flags);
-
-    if (currently_blocked > 0)
-        currently_blocked--;
-
-    if (delay > max_delay)
-        max_delay = delay;
-
-    spin_unlock_irqrestore(&stats_lock, flags);
-}
-
-static void window_timer_callback(struct timer_list *t)
+static enum hrtimer_restart window_timer_callback(struct hrtimer *t)
 {
     unsigned long flags;
 
@@ -106,19 +66,24 @@ static void window_timer_callback(struct timer_list *t)
 
     if (READ_ONCE(monitor_enabled)) {
         global_count = 0;
-        global_window_start = jiffies;
         window_generation++;
 
-        mod_timer(&window_timer,
-                  global_window_start + msecs_to_jiffies(WINDOW_MS));
+        hrtimer_forward_now(&window_timer, ms_to_ktime(WINDOW_MS));
+
+        spin_unlock_irqrestore(&counter_lock, flags);
+
+        wake_up_all(&throttle_wq);
+
+        return HRTIMER_RESTART;
     }
 
     spin_unlock_irqrestore(&counter_lock, flags);
 
     wake_up_all(&throttle_wq);
+
+    return HRTIMER_NORESTART;
 }
 
-//funzione che stabilisce se c'è ancora spazio nella finestra corrente
 
 static int try_consume_slot(unsigned long *count_snapshot)
 {
@@ -139,6 +104,7 @@ static int try_consume_slot(unsigned long *count_snapshot)
 
     return allowed;
 }
+
 void monitor_set_enabled(int val)
 {
     unsigned long flags;
@@ -147,25 +113,29 @@ void monitor_set_enabled(int val)
     WRITE_ONCE(monitor_enabled, enabled);
 
     if (enabled) {
-        spin_lock_irqsave(&counter_lock, flags);
+          spin_lock_irqsave(&counter_lock, flags);
 
         global_count = 0;
-        global_window_start = jiffies;
         window_generation++;
 
-        mod_timer(&window_timer,
-                  global_window_start + msecs_to_jiffies(WINDOW_MS));
+        hrtimer_start(&window_timer,
+                      ms_to_ktime(WINDOW_MS),
+                      HRTIMER_MODE_REL);
 
         spin_unlock_irqrestore(&counter_lock, flags);
+
+        stats_on_monitor_start();
     } else {
-        timer_delete_sync(&window_timer);
+        
+        hrtimer_cancel(&window_timer);
         wake_up_all(&throttle_wq);
+
+        stats_on_monitor_stop();
     }
 
     printk(KERN_INFO "[MONITOR] %s\n",
            enabled ? "ENABLED" : "DISABLED");
 }
-
 
 void monitor_set_max(unsigned long val)
 {
@@ -174,9 +144,10 @@ void monitor_set_max(unsigned long val)
 
     WRITE_ONCE(max_calls, val);
 
+    stats_init(); //ATTENZIONE : da rivedere
+
     printk(KERN_INFO "[MONITOR] MAX set to %lu\n", val);
 }
-
 
 int should_block(int nr)
 {
@@ -187,17 +158,21 @@ int should_block(int nr)
     int uid_match;
     int prog_match;
 
-    if (!READ_ONCE(monitor_enabled)){
+    int was_blocked = 0;
+    ktime_t block_start = 0;
+
+    if (!READ_ONCE(monitor_enabled))
         return 0;
-    }
 
     if (!is_syscall_monitored(nr))
         return 0;
 
     ret = get_current_exe_inode(&dev, &ino);
     if (ret) {
-        printk(KERN_INFO "[MONITOR] get_current_exe_inode failed ret=%d comm=%s\n",
-               ret, current->comm);
+        printk(KERN_INFO
+               "[MONITOR] get_current_exe_inode failed ret=%d comm=%s\n",
+               ret,
+               current->comm);
         return 0;
     }
 
@@ -208,14 +183,29 @@ int should_block(int nr)
         return 0;
 
     while (READ_ONCE(monitor_enabled)) {
-        unsigned long start;
-        unsigned long delay;
         unsigned long my_generation;
         unsigned long local_count = 0;
         unsigned long local_max = READ_ONCE(max_calls);
+        unsigned long blocked_now = 0;
+        unsigned long peak_now = 0;
 
         if (try_consume_slot(&local_count)) {
-            printk(KERN_INFO "[MONITOR] allowed count=%lu max=%lu euid=%d prog=%s syscall=%d dev=%u:%u ino=%lu\n",
+            if (was_blocked) {
+                ktime_t end = ktime_get();
+                s64 delay_ns = ktime_to_ns(ktime_sub(end, block_start));
+
+                stats_on_block_end((u64)delay_ns, uid, current->comm);
+
+                printk(KERN_INFO
+                       "[THROTTLE] pid=%d syscall=%d total_waited_ns=%lld total_waited_ms=%lld\n",
+                       current->pid,
+                       nr,
+                       delay_ns,
+                       delay_ns / 1000000);
+            }
+
+            printk(KERN_INFO
+                   "[MONITOR] allowed count=%lu max=%lu euid=%d prog=%s syscall=%d dev=%u:%u ino=%lu\n",
                    local_count,
                    local_max,
                    __kuid_val(uid),
@@ -228,46 +218,56 @@ int should_block(int nr)
             return 0;
         }
 
-        start = jiffies;
+        if (!was_blocked) {
+            was_blocked = 1;
+            block_start = ktime_get();
 
+            stats_on_block_start(&blocked_now, &peak_now);
 
-        stats_on_block_start();
+            printk(KERN_INFO
+                   "[THROTTLE] pid=%d first_block blocked_now=%lu peak=%lu count=%lu/%lu\n",
+                   current->pid,
+                   blocked_now,
+                   peak_now,
+                   local_count,
+                   local_max);
+        }
 
-        my_generation = window_generation;
+        my_generation = READ_ONCE(window_generation);
 
-        printk(KERN_INFO
-       "[THROTTLE] pid=%d blocked_now=%lu peak=%lu count=%lu/%lu\n",
-       current->pid,
-       currently_blocked,
-       peak_blocked_threads,
-       local_count,
-       local_max);
-        ret = wait_event_interruptible(throttle_wq,
-                               window_generation != my_generation ||
-                               !READ_ONCE(monitor_enabled));
-        delay = jiffies - start;
-        printk(KERN_INFO
-       "[THROTTLE] pid=%d syscall=%d waited_jiffies=%lu waited_ms=%u\n",
-       current->pid,
-       nr,
-       delay,
-       jiffies_to_msecs(delay));
-        stats_on_block_end(delay);
+        ret = wait_event_interruptible(
+            throttle_wq,
+            READ_ONCE(window_generation) != my_generation ||
+            !READ_ONCE(monitor_enabled)
+        );
 
         if (ret) {
-        printk(KERN_INFO
-           "[THROTTLE] interrupted by signal pid=%d prog=%s ret=%d\n",
-           current->pid,
-           current->comm,
-           ret);
-        return 0;
+            if (was_blocked) {
+                ktime_t end = ktime_get();
+                s64 delay_ns = ktime_to_ns(ktime_sub(end, block_start));
+
+                stats_on_block_end((u64)delay_ns, uid, current->comm);
+            }
+
+            printk(KERN_INFO
+                   "[THROTTLE] interrupted by signal pid=%d prog=%s ret=%d\n",
+                   current->pid,
+                   current->comm,
+                   ret);
+
+            return 0;
         }
+    }
+
+    if (was_blocked) {
+        ktime_t end = ktime_get();
+        s64 delay_ns = ktime_to_ns(ktime_sub(end, block_start));
+
+        stats_on_block_end((u64)delay_ns, uid, current->comm);
     }
 
     return 0;
 }
-
-//inizializzazione monitor e timer della finestra;
 
 int monitor_init(void)
 {
@@ -275,15 +275,14 @@ int monitor_init(void)
     WRITE_ONCE(max_calls, DEFAULT_MAX_CALLS);
 
     global_count = 0;
-    global_window_start = 0;
     window_generation = 0;
 
-    timer_setup(&window_timer, window_timer_callback, 0);
+    hrtimer_setup(&window_timer,
+                  window_timer_callback,
+                  CLOCK_MONOTONIC,
+                  HRTIMER_MODE_REL);
 
-    max_delay = 0;
-    blocked_threads_total = 0;
-    currently_blocked = 0;
-    peak_blocked_threads = 0;
+    stats_init();
 
     printk(KERN_INFO "[MONITOR] initialized default OFF max=%lu\n",
            READ_ONCE(max_calls));
@@ -291,15 +290,30 @@ int monitor_init(void)
     return 0;
 }
 
+
 void monitor_cleanup(void)
 {
-    timer_delete_sync(&window_timer);
+    struct monitor_stats s;
+
+    WRITE_ONCE(monitor_enabled, false);
+
+    hrtimer_cancel(&window_timer);
     wake_up_all(&throttle_wq);
+
+    stats_on_monitor_stop();
+    stats_get(&s);
 
     printk(KERN_INFO "[MONITOR] cleanup\n");
 
-    printk(KERN_INFO "[STATS] max_delay_jiffies=%lu blocked_total=%lu peak_blocked_threads=%lu\n",
-           max_delay,
-           blocked_threads_total,
-           peak_blocked_threads);
+    printk(KERN_INFO
+           "[STATS] peak_delay_ns=%llu peak_delay_us=%llu peak_delay_ms=%llu peak_uid=%d peak_prog=%s blocked_total=%lu currently_blocked=%lu peak_blocked=%lu avg_blocked=%lu\n",
+           s.peak_delay_ns,
+           s.peak_delay_us,
+           s.peak_delay_ms,
+           s.peak_delay_uid,
+           s.peak_delay_comm,
+           s.blocked_threads_total,
+           s.currently_blocked,
+           s.peak_blocked_threads,
+           s.avg_blocked_threads);
 }

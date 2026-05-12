@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <limits.h>
+#include <linux/sched.h>
+
 
 #define IOCTL_ADD_SYSCALL           _IOW('a', 1, int)
 #define IOCTL_REMOVE_SYSCALL        _IOW('a', 2, int)
@@ -18,6 +20,27 @@
 #define IOCTL_DISABLE_MONITOR       _IO('a', 8)
 
 #define IOCTL_SET_MAX               _IOW('a', 9, int)
+
+#define IOCTL_GET_STATS _IOR('a', 10, struct monitor_stats)
+
+
+struct monitor_stats {
+    unsigned long long peak_delay_ns;
+    unsigned long long peak_delay_us;
+    unsigned long long peak_delay_ms;
+
+    int peak_delay_uid;
+    char peak_delay_comm[16];
+
+    unsigned long blocked_threads_total;
+    unsigned long currently_blocked;
+    unsigned long peak_blocked_threads;
+
+    unsigned long blocked_samples;
+    unsigned long blocked_sum;
+    unsigned long avg_blocked_threads;
+};
+
 
 static void clear_stdin_line(void)
 {
@@ -81,8 +104,8 @@ int main(void)
         printf("7) Enable monitor\n");
         printf("8) Disable monitor\n");
         printf("9) Set MAX calls per window\n");
-        printf("10) Exit\n");
-
+        printf("10) Get stats\n");
+        printf("11) Exit\n");
         if (read_int("Scelta: ", &choice) < 0) {
             printf("Input non valido\n");
             continue;
@@ -198,8 +221,32 @@ int main(void)
                 printf("MAX impostato a: %d\n", value);
             }
             break;
-
         case 10:
+        {
+            struct monitor_stats stats;
+
+            if (ioctl(fd, IOCTL_GET_STATS, &stats) < 0) {
+            perror("ioctl GET_STATS");
+            } else {
+                printf("\n=== MONITOR STATS ===\n");
+                printf("Peak delay: %llu ns (%llu us, %llu ms)\n",
+                    stats.peak_delay_ns,
+                    stats.peak_delay_us,
+                    stats.peak_delay_ms);
+
+                printf("Peak delay process: %s\n", stats.peak_delay_comm);
+                printf("Peak delay UID: %d\n", stats.peak_delay_uid);
+
+                printf("Blocked total: %lu\n", stats.blocked_threads_total);
+                printf("Currently blocked: %lu\n", stats.currently_blocked);
+                printf("Peak blocked threads: %lu\n", stats.peak_blocked_threads);
+                printf("Average blocked threads: %lu\n", stats.avg_blocked_threads);
+            }
+
+            break;
+        }
+
+        case 11:
             close(fd);
             return 0;
 

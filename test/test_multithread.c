@@ -5,11 +5,15 @@
 #include <sys/syscall.h>
 #include <pthread.h>
 
-#define NUM_THREADS 21
+#define NUM_THREADS 100
+
+static pthread_barrier_t barrier;
 
 static void *worker(void *arg)
 {
     long id = (long)arg;
+
+    pthread_barrier_wait(&barrier);
 
     syscall(SYS_getpid);
 
@@ -22,6 +26,8 @@ int main(void)
 {
     pthread_t threads[NUM_THREADS];
 
+    pthread_barrier_init(&barrier, NULL, NUM_THREADS);
+
     printf("[TEST] creating %d threads\n", NUM_THREADS);
 
     for (long i = 0; i < NUM_THREADS; i++) {
@@ -33,6 +39,8 @@ int main(void)
 
     for (int i = 0; i < NUM_THREADS; i++)
         pthread_join(threads[i], NULL);
+
+    pthread_barrier_destroy(&barrier);
 
     printf("[TEST] completed\n");
 
