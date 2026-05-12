@@ -16,7 +16,7 @@
 #include "registry.h"
 
 #define DEFAULT_MAX_CALLS 10
-#define WINDOW_MS 10000
+#define WINDOW_MS 1000
 
 
 static bool monitor_enabled;
@@ -104,9 +104,14 @@ static void window_timer_callback(struct timer_list *t)
 
     spin_lock_irqsave(&counter_lock, flags);
 
-    global_count = 0;
-    global_window_start = jiffies;
-    window_generation++;
+    if (READ_ONCE(monitor_enabled)) {
+        global_count = 0;
+        global_window_start = jiffies;
+        window_generation++;
+
+        mod_timer(&window_timer,
+                  global_window_start + msecs_to_jiffies(WINDOW_MS));
+    }
 
     spin_unlock_irqrestore(&counter_lock, flags);
 
@@ -118,26 +123,13 @@ static void window_timer_callback(struct timer_list *t)
 static int try_consume_slot(unsigned long *count_snapshot)
 {
     unsigned long flags;
-    unsigned long now;
     int allowed = 0;
-    int wake = 0;
 
     spin_lock_irqsave(&counter_lock, flags);
-
-    now = jiffies;
-
-    if (time_after_eq(now, global_window_start + msecs_to_jiffies(WINDOW_MS))) { 
-        global_count = 0;
-        global_window_start = now;
-        window_generation++;
-        wake = 1;
-    }//sto resettando il contatore globale e l'inizio della finestra
 
     if (global_count < READ_ONCE(max_calls)) {
         global_count++;
         allowed = 1;
-    } else {
-        mod_timer(&window_timer, global_window_start + msecs_to_jiffies(WINDOW_MS));
     }
 
     if (count_snapshot)
@@ -145,12 +137,8 @@ static int try_consume_slot(unsigned long *count_snapshot)
 
     spin_unlock_irqrestore(&counter_lock, flags);
 
-    if (wake)
-        wake_up_all(&throttle_wq);
-
     return allowed;
 }
-
 void monitor_set_enabled(int val)
 {
     unsigned long flags;
@@ -242,6 +230,7 @@ int should_block(int nr)
 
         start = jiffies;
 
+
         stats_on_block_start();
 
         my_generation = window_generation;
@@ -257,7 +246,12 @@ int should_block(int nr)
                                window_generation != my_generation ||
                                !READ_ONCE(monitor_enabled));
         delay = jiffies - start;
-
+        printk(KERN_INFO
+       "[THROTTLE] pid=%d syscall=%d waited_jiffies=%lu waited_ms=%u\n",
+       current->pid,
+       nr,
+       delay,
+       jiffies_to_msecs(delay));
         stats_on_block_end(delay);
 
         if (ret) {

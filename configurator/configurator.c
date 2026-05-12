@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -18,25 +19,39 @@
 
 #define IOCTL_SET_MAX               _IOW('a', 9, int)
 
+static void clear_stdin_line(void)
+{
+    int c;
+
+    while ((c = getchar()) != '\n' && c != EOF)
+        ;
+}
+
 static int read_int(const char *prompt, int *value)
 {
     printf("%s", prompt);
+    fflush(stdout);
 
     if (scanf("%d", value) != 1) {
-        while (getchar() != '\n');
+        clear_stdin_line();
         return -1;
     }
 
+    clear_stdin_line();
     return 0;
 }
 
 static int read_string(const char *prompt, char *buf, size_t size)
 {
     printf("%s", prompt);
+    fflush(stdout);
 
-    if (scanf("%4095s", buf) != 1)
+    if (scanf("%4095s", buf) != 1) {
+        clear_stdin_line();
         return -1;
+    }
 
+    clear_stdin_line();
     buf[size - 1] = '\0';
 
     return 0;
@@ -65,29 +80,26 @@ int main(void)
         printf("6) Remove program by executable path\n");
         printf("7) Enable monitor\n");
         printf("8) Disable monitor\n");
-        printf("9) Set MAX calls per second\n");
+        printf("9) Set MAX calls per window\n");
         printf("10) Exit\n");
-        printf("Scelta: ");
 
-        if (scanf("%d", &choice) != 1) {
+        if (read_int("Scelta: ", &choice) < 0) {
             printf("Input non valido\n");
-            while (getchar() != '\n');
             continue;
         }
 
         switch (choice) {
-
         case 1:
             if (read_int("Numero syscall da aggiungere: ", &value) < 0) {
                 printf("Numero non valido\n");
                 break;
             }
 
-            if (ioctl(fd, IOCTL_ADD_SYSCALL, &value) < 0)
+            if (ioctl(fd, IOCTL_ADD_SYSCALL, &value) < 0) {
                 perror("ioctl ADD_SYSCALL");
-            else
+            } else {
                 printf("Syscall aggiunta: %d\n", value);
-
+            }
             break;
 
         case 2:
@@ -96,11 +108,11 @@ int main(void)
                 break;
             }
 
-            if (ioctl(fd, IOCTL_REMOVE_SYSCALL, &value) < 0)
+            if (ioctl(fd, IOCTL_REMOVE_SYSCALL, &value) < 0) {
                 perror("ioctl REMOVE_SYSCALL");
-            else
+            } else {
                 printf("Syscall rimossa: %d\n", value);
-
+            }
             break;
 
         case 3:
@@ -109,11 +121,11 @@ int main(void)
                 break;
             }
 
-            if (ioctl(fd, IOCTL_ADD_UID, &value) < 0)
+            if (ioctl(fd, IOCTL_ADD_UID, &value) < 0) {
                 perror("ioctl ADD_UID");
-            else
+            } else {
                 printf("UID aggiunto: %d\n", value);
-
+            }
             break;
 
         case 4:
@@ -122,11 +134,11 @@ int main(void)
                 break;
             }
 
-            if (ioctl(fd, IOCTL_REMOVE_UID, &value) < 0)
+            if (ioctl(fd, IOCTL_REMOVE_UID, &value) < 0) {
                 perror("ioctl REMOVE_UID");
-            else
+            } else {
                 printf("UID rimosso: %d\n", value);
-
+            }
             break;
 
         case 5:
@@ -136,11 +148,11 @@ int main(void)
                 break;
             }
 
-            if (ioctl(fd, IOCTL_ADD_PROGRAM_NAME, path) < 0)
+            if (ioctl(fd, IOCTL_ADD_PROGRAM_NAME, path) < 0) {
                 perror("ioctl ADD_PROGRAM_NAME");
-            else
+            } else {
                 printf("Programma aggiunto: %s\n", path);
-
+            }
             break;
 
         case 6:
@@ -150,40 +162,41 @@ int main(void)
                 break;
             }
 
-            if (ioctl(fd, IOCTL_REMOVE_PROGRAM_NAME, path) < 0)
+            if (ioctl(fd, IOCTL_REMOVE_PROGRAM_NAME, path) < 0) {
                 perror("ioctl REMOVE_PROGRAM_NAME");
-            else
+            } else {
                 printf("Programma rimosso: %s\n", path);
-
+            }
             break;
 
         case 7:
-            if (ioctl(fd, IOCTL_ENABLE_MONITOR) < 0)
+            if (ioctl(fd, IOCTL_ENABLE_MONITOR) < 0) {
                 perror("ioctl ENABLE_MONITOR");
-            else
+            } else {
                 printf("Monitor abilitato\n");
-
+            }
             break;
 
         case 8:
-            if (ioctl(fd, IOCTL_DISABLE_MONITOR) < 0)
+            if (ioctl(fd, IOCTL_DISABLE_MONITOR) < 0) {
                 perror("ioctl DISABLE_MONITOR");
-            else
+            } else {
                 printf("Monitor disabilitato\n");
-
+            }
             break;
 
         case 9:
-            if (read_int("Nuovo MAX chiamate/sec: ", &value) < 0 || value <= 0) {
+            if (read_int("Nuovo MAX chiamate per finestra: ", &value) < 0 ||
+                value <= 0) {
                 printf("MAX non valido\n");
                 break;
             }
 
-            if (ioctl(fd, IOCTL_SET_MAX, &value) < 0)
+            if (ioctl(fd, IOCTL_SET_MAX, &value) < 0) {
                 perror("ioctl SET_MAX");
-            else
+            } else {
                 printf("MAX impostato a: %d\n", value);
-
+            }
             break;
 
         case 10:
