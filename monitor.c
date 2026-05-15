@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
+#include <asm/unistd.h>
 
 #include "monitor.h"
 #include "registry.h"
@@ -72,7 +73,7 @@ static enum hrtimer_restart window_timer_callback(struct hrtimer *t)
 
         spin_unlock_irqrestore(&counter_lock, flags);
 
-        wake_up_all(&throttle_wq);
+        wake_up_nr(&throttle_wq, (int)READ_ONCE(max_calls));
 
         return HRTIMER_RESTART;
     }
@@ -105,31 +106,23 @@ static int try_consume_slot(unsigned long *count_snapshot)
     return allowed;
 }
 
-void monitor_set_enabled(int val)
+void monitor_set_enabled(bool val)
 {
     unsigned long flags;
-    bool enabled = val ? true : false;
-
-    WRITE_ONCE(monitor_enabled, enabled);
+    bool enabled = val;
 
     if (enabled) {
-          spin_lock_irqsave(&counter_lock, flags);
-
+        spin_lock_irqsave(&counter_lock, flags);
         global_count = 0;
         window_generation++;
-
-        hrtimer_start(&window_timer,
-                      ms_to_ktime(WINDOW_MS),
-                      HRTIMER_MODE_REL);
-
+        WRITE_ONCE(monitor_enabled, true);
+        hrtimer_start(&window_timer, ms_to_ktime(WINDOW_MS), HRTIMER_MODE_REL);
         spin_unlock_irqrestore(&counter_lock, flags);
-
         stats_on_monitor_start();
     } else {
-        
+        WRITE_ONCE(monitor_enabled, false);
         hrtimer_cancel(&window_timer);
         wake_up_all(&throttle_wq);
-
         stats_on_monitor_stop();
     }
 
@@ -148,89 +141,84 @@ void monitor_set_max(unsigned long val)
 
     printk(KERN_INFO "[MONITOR] MAX set to %lu\n", val);
 }
-
-int should_block(int nr)
+static int is_subject_to_monitor(int nr, kuid_t *uid_out,
+                                  dev_t *dev_out, unsigned long *ino_out)
 {
-    kuid_t uid = current_euid();
+    kuid_t uid;
     dev_t dev = 0;
     unsigned long ino = 0;
     int ret;
-    int uid_match;
-    int prog_match;
 
-    int was_blocked = 0;
-    ktime_t block_start = 0;
-
-    if (!READ_ONCE(monitor_enabled))
-        return 0;
-
+    /* 1. syscall monitorata? bitmap lookup, costo zero */
     if (!is_syscall_monitored(nr))
         return 0;
 
+    uid = current_euid();
+
+    /* 2. UID monitorato? hash lookup, veloce */
+    if (is_uid_monitored(uid)) {
+        *uid_out = uid;
+        *dev_out = dev;
+        *ino_out = ino;
+        return 1;
+    }
+
+    /* 3. solo se UID non matcha, risolvi l'inode — operazione più costosa */
     ret = get_current_exe_inode(&dev, &ino);
     if (ret) {
-        printk(KERN_INFO
-               "[MONITOR] get_current_exe_inode failed ret=%d comm=%s\n",
-               ret,
-               current->comm);
+        pr_debug("[MONITOR] get_current_exe_inode failed ret=%d comm=%s\n",
+                 ret, current->comm);
         return 0;
     }
 
-    uid_match = is_uid_monitored(uid);
-    prog_match = is_prog_inode_monitored(dev, ino);
-
-    if (!uid_match && !prog_match)
+    if (!is_prog_inode_monitored(dev, ino))
         return 0;
 
+    *uid_out = uid;
+    *dev_out = dev;
+    *ino_out = ino;
+
+    return 1;
+}
+
+static int do_throttle(int nr, kuid_t uid)
+{
+    int was_blocked = 0;
+    ktime_t block_start = ktime_get();
+    unsigned long my_generation;
+    int ret;
+
     while (READ_ONCE(monitor_enabled)) {
-        unsigned long my_generation;
+
         unsigned long local_count = 0;
-        unsigned long local_max = READ_ONCE(max_calls);
-        unsigned long blocked_now = 0;
-        unsigned long peak_now = 0;
 
         if (try_consume_slot(&local_count)) {
+
             if (was_blocked) {
-                ktime_t end = ktime_get();
-                s64 delay_ns = ktime_to_ns(ktime_sub(end, block_start));
+                s64 delay_ns = ktime_to_ns(
+                    ktime_sub(ktime_get(), block_start));
 
                 stats_on_block_end((u64)delay_ns, uid, current->comm);
 
-                printk(KERN_INFO
-                       "[THROTTLE] pid=%d syscall=%d total_waited_ns=%lld total_waited_ms=%lld\n",
-                       current->pid,
-                       nr,
-                       delay_ns,
-                       delay_ns / 1000000);
+                pr_debug("[THROTTLE] pid=%d syscall=%d waited_ms=%lld\n",
+                         current->pid, nr, delay_ns / 1000000);
             }
-
-            printk(KERN_INFO
-                   "[MONITOR] allowed count=%lu max=%lu euid=%d prog=%s syscall=%d dev=%u:%u ino=%lu\n",
-                   local_count,
-                   local_max,
-                   __kuid_val(uid),
-                   current->comm,
-                   nr,
-                   MAJOR(dev),
-                   MINOR(dev),
-                   ino);
 
             return 0;
         }
 
+        /* prima volta che non trova slot */
         if (!was_blocked) {
+            unsigned long blocked_now, peak_now;
+
             was_blocked = 1;
             block_start = ktime_get();
 
             stats_on_block_start(&blocked_now, &peak_now);
 
-            printk(KERN_INFO
-                   "[THROTTLE] pid=%d first_block blocked_now=%lu peak=%lu count=%lu/%lu\n",
-                   current->pid,
-                   blocked_now,
-                   peak_now,
-                   local_count,
-                   local_max);
+            pr_debug("[THROTTLE] pid=%d first_block blocked=%lu peak=%lu count=%lu/%lu\n",
+                     current->pid, blocked_now, peak_now,
+                     local_count, READ_ONCE(max_calls));
         }
 
         my_generation = READ_ONCE(window_generation);
@@ -241,32 +229,44 @@ int should_block(int nr)
             !READ_ONCE(monitor_enabled)
         );
 
+        /* segnale ricevuto — non bloccare la syscall, lascia passare */
         if (ret) {
             if (was_blocked) {
-                ktime_t end = ktime_get();
-                s64 delay_ns = ktime_to_ns(ktime_sub(end, block_start));
-
+                s64 delay_ns = ktime_to_ns(
+                    ktime_sub(ktime_get(), block_start));
                 stats_on_block_end((u64)delay_ns, uid, current->comm);
             }
 
-            printk(KERN_INFO
-                   "[THROTTLE] interrupted by signal pid=%d prog=%s ret=%d\n",
-                   current->pid,
-                   current->comm,
-                   ret);
-
+            pr_debug("[THROTTLE] interrupted pid=%d prog=%s\n",
+                     current->pid, current->comm);
             return 0;
         }
     }
 
+    /* monitor disabilitato mentre aspettavamo */
     if (was_blocked) {
-        ktime_t end = ktime_get();
-        s64 delay_ns = ktime_to_ns(ktime_sub(end, block_start));
-
+        s64 delay_ns = ktime_to_ns(
+            ktime_sub(ktime_get(), block_start));
         stats_on_block_end((u64)delay_ns, uid, current->comm);
     }
 
     return 0;
+}
+
+int should_block(int nr)
+{
+    kuid_t uid;
+    dev_t dev;
+    unsigned long ino;
+
+    /* check velocissimo prima di qualsiasi altra cosa */
+    if (!READ_ONCE(monitor_enabled))
+        return 0;
+
+    if (!is_subject_to_monitor(nr, &uid, &dev, &ino))
+        return 0;
+
+    return do_throttle(nr, uid);
 }
 
 int monitor_init(void)

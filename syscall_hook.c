@@ -212,7 +212,14 @@ static int patch_x64_sys_call(void)
 
     jump_inst[0] = 0xE9;
 
-    offset = (int)((unsigned long)call - x64_sys_call_addr - INST_LEN);
+    long raw_offset = (long)((unsigned long)call - x64_sys_call_addr - INST_LEN);
+
+    if (raw_offset > INT_MAX || raw_offset < INT_MIN) {
+        printk(KERN_ERR "%s: jump offset out of range: %ld\n", MODNAME, raw_offset);
+        return -ERANGE;
+    }
+
+    offset = (int)raw_offset;
 
     memcpy(jump_inst + 1, &offset, sizeof(int));
 

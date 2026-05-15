@@ -4,6 +4,35 @@
 #include <linux/types.h>
 #include <linux/cred.h>
 
+/* ================= USERSPACE LIST =============== */
+#define MAX_UIDS     64
+#define MAX_PROGS    64
+#define MAX_SYSCALLS 512
+
+/* struct per trasferire le liste in userspace */
+struct uid_list {
+    int count;
+    int uids[MAX_UIDS];
+};
+
+struct prog_list {
+    int count;
+    struct prog_entry {
+        unsigned int major;
+        unsigned int minor;
+        unsigned long ino;
+    } entries[MAX_PROGS];
+};
+
+struct syscall_list {
+    int count;
+    int nrs[MAX_SYSCALLS];
+};
+
+int get_uid_list(struct uid_list *out);
+int get_prog_list(struct prog_list *out);
+int get_syscall_list(struct syscall_list *out);
+
 /* ================= UID ================= */
 
 int add_user_id(int uid);

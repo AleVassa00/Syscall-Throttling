@@ -15,9 +15,6 @@
 
 #include "registry.h"
 
-#define MAX_UIDS      64
-#define MAX_PROGS     64
-#define MAX_SYSCALLS  __NR_syscalls
 
 static DEFINE_RWLOCK(registry_syscall_lock);
 static DEFINE_RWLOCK(registry_path_lock);
@@ -45,6 +42,7 @@ struct monitored_uid {
 struct monitored_prog {
     dev_t dev;
     unsigned long ino;
+    char name[NAME_MAX + 1];
     struct hlist_node node;
 };
 
@@ -250,6 +248,7 @@ int add_prog_inode(const char *prog_path)
 
     entry->dev = dev;
     entry->ino = ino;
+    strscpy(entry->name, kbasename(prog_path), sizeof(entry->name));
     key = prog_hash_key(dev, ino);
 
     hash_add(progs_table, &entry->node, key);
@@ -404,4 +403,81 @@ void registry_cleanup(void)
     prog_count = 0;
 
     write_unlock(&registry_path_lock);
+}
+
+
+int get_uid_list(struct uid_list *out)
+{
+    struct monitored_uid *entry;
+    int bkt;
+    int i = 0;
+
+    if (!out)
+        return -EINVAL;
+
+    read_lock(&registry_uid_lock);
+
+    hash_for_each(uid_table, bkt, entry, node) {
+        if (i >= MAX_UIDS)
+            break;
+        out->uids[i++] = __kuid_val(entry->uid);
+    }
+
+    out->count = i;
+
+    read_unlock(&registry_uid_lock);
+
+    return 0;
+}
+
+int get_prog_list(struct prog_list *out)
+{
+    struct monitored_prog *entry;
+    int bkt;
+    int i = 0;
+
+    if (!out)
+        return -EINVAL;
+
+    read_lock(&registry_path_lock);
+
+    hash_for_each(progs_table, bkt, entry, node) {
+        if (i >= MAX_PROGS)
+            break;
+        out->entries[i].major = MAJOR(entry->dev);
+        out->entries[i].minor = MINOR(entry->dev);
+        out->entries[i].ino   = entry->ino;
+        i++;
+    }
+
+    out->count = i;
+
+    read_unlock(&registry_path_lock);
+
+    return 0;
+}
+
+int get_syscall_list(struct syscall_list *out)
+{
+    int nr;
+    int i = 0;
+
+    if (!out)
+        return -EINVAL;
+
+    read_lock(&registry_syscall_lock);
+
+    for (nr = 0; nr < MAX_SYSCALLS; nr++) {
+        if (test_bit(nr, monitored_syscalls)) {
+            if (i >= MAX_SYSCALLS)
+                break;
+            out->nrs[i++] = nr;
+        }
+    }
+
+    out->count = i;
+
+    read_unlock(&registry_syscall_lock);
+
+    return 0;
 }

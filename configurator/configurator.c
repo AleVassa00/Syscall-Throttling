@@ -7,6 +7,7 @@
 #include <linux/sched.h>
 
 
+
 #define IOCTL_ADD_SYSCALL           _IOW('a', 1, int)
 #define IOCTL_REMOVE_SYSCALL        _IOW('a', 2, int)
 
@@ -21,26 +22,51 @@
 
 #define IOCTL_SET_MAX               _IOW('a', 9, int)
 
+#define IOCTL_LIST_UIDS      _IOR('a', 11, struct uid_list)
+#define IOCTL_LIST_PROGRAMS  _IOR('a', 12, struct prog_list)
+#define IOCTL_LIST_SYSCALLS  _IOR('a', 13, struct syscall_list)
+
 #define IOCTL_GET_STATS _IOR('a', 10, struct monitor_stats)
 
+#define MAX_UIDS     64
+#define MAX_PROGS    64
+#define MAX_SYSCALLS 512
 
 struct monitor_stats {
     unsigned long long peak_delay_ns;
     unsigned long long peak_delay_us;
     unsigned long long peak_delay_ms;
-
     int peak_delay_uid;
     char peak_delay_comm[16];
-
     unsigned long blocked_threads_total;
     unsigned long currently_blocked;
     unsigned long peak_blocked_threads;
-
-    unsigned long blocked_samples;
-    unsigned long blocked_sum;
+    unsigned long long blocked_time_sum_ns;  
+    unsigned long long monitor_time_ns;      
     unsigned long avg_blocked_threads;
 };
 
+
+struct uid_list {
+    int count;
+    int uids[MAX_UIDS];
+};
+
+struct prog_entry {
+    unsigned int major;
+    unsigned int minor;
+    unsigned long ino;
+};
+
+struct prog_list {
+    int count;
+    struct prog_entry entries[MAX_PROGS];
+};
+
+struct syscall_list {
+    int count;
+    int nrs[MAX_SYSCALLS];
+};
 
 static void clear_stdin_line(void)
 {
@@ -105,7 +131,10 @@ int main(void)
         printf("8) Disable monitor\n");
         printf("9) Set MAX calls per window\n");
         printf("10) Get stats\n");
-        printf("11) Exit\n");
+        printf("11) List registered UIDs\n");
+        printf("12) List registered IOCTL_LIST_PROGRAMS\n");
+        printf("13) List registered syscalls\n"); 
+        printf("14) Exit\n");   /* era 11 */
         if (read_int("Scelta: ", &choice) < 0) {
             printf("Input non valido\n");
             continue;
@@ -245,8 +274,77 @@ int main(void)
 
             break;
         }
+        case 11: {
+            struct uid_list list;
+            int i;
 
-        case 11:
+            if (ioctl(fd, IOCTL_LIST_UIDS, &list) < 0) {
+                perror("ioctl LIST_UIDS");
+                break;
+            }
+
+            printf("\n=== REGISTERED UIDs (%d) ===\n", list.count);
+
+            if (list.count == 0) {
+                printf("  (none)\n");
+                break;
+            }
+
+            for (i = 0; i < list.count; i++)
+                printf("  [%d] UID=%d\n", i, list.uids[i]);
+
+            break;
+        }
+
+        case 12: {
+            struct prog_list list;
+            int i;
+
+            if (ioctl(fd, IOCTL_LIST_PROGRAMS, &list) < 0) {
+                perror("ioctl LIST_PROGRAMS");
+                break;
+            }
+
+            printf("\n=== REGISTERED PROGRAMS (%d) ===\n", list.count);
+
+            if (list.count == 0) {
+                printf("  (none)\n");
+                break;
+            }
+
+            for (i = 0; i < list.count; i++)
+                printf("  [%d] dev=%u:%u ino=%lu\n",
+                       i,
+                       list.entries[i].major,
+                       list.entries[i].minor,
+                       list.entries[i].ino);
+
+            break;
+        }
+
+        case 13: {
+            struct syscall_list list;
+            int i;
+
+            if (ioctl(fd, IOCTL_LIST_SYSCALLS, &list) < 0) {
+                perror("ioctl LIST_SYSCALLS");
+                break;
+            }
+
+            printf("\n=== REGISTERED SYSCALLS (%d) ===\n", list.count);
+
+            if (list.count == 0) {
+                printf("  (none)\n");
+                break;
+            }
+
+            for (i = 0; i < list.count; i++)
+                printf("  [%d] nr=%d\n", i, list.nrs[i]);
+
+            break;
+        }
+
+        case 14:
             close(fd);
             return 0;
 

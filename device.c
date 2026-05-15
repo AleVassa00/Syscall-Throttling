@@ -6,6 +6,8 @@
 #include <linux/limits.h>
 #include <linux/slab.h>
 
+
+
 #include "syscall_hook.h"
 #include "device.h"
 #include "monitor.h"
@@ -27,6 +29,10 @@
 #define IOCTL_SET_MAX               _IOW('a', 9, int)
 
 #define IOCTL_GET_STATS             _IOR('a', 10, struct monitor_stats)
+
+#define IOCTL_LIST_UIDS      _IOR('a', 11, struct uid_list)
+#define IOCTL_LIST_PROGRAMS  _IOR('a', 12, struct prog_list)
+#define IOCTL_LIST_SYSCALLS  _IOR('a', 13, struct syscall_list)
 
 static int get_int_from_user(unsigned long arg, int *value)
 {
@@ -143,12 +149,12 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         break;
 
     case IOCTL_ENABLE_MONITOR:
-        monitor_set_enabled(1);
+        monitor_set_enabled(true);
         ret = 0;
         break;
 
     case IOCTL_DISABLE_MONITOR:
-        monitor_set_enabled(0);
+        monitor_set_enabled(false);
         ret = 0;
         break;
 
@@ -163,19 +169,76 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
             }
         }
         break;
-    case IOCTL_GET_STATS:
+    case IOCTL_GET_STATS:{         
+        struct monitor_stats stats;
+        stats_get(&stats);
+        if (copy_to_user((void __user *)arg, &stats, sizeof(stats)))
+            ret = -EFAULT;
+        else
+            ret = 0;
+        break;
+    }
+    case IOCTL_LIST_UIDS: {
+        struct uid_list *list;
 
-    struct monitor_stats stats;
+        list = kmalloc(sizeof(*list), GFP_KERNEL);
+        if (!list) {
+            ret = -ENOMEM;
+            break;
+        }
 
-    stats_get(&stats);
+        ret = get_uid_list(list);
+        if (!ret) {
+            if (copy_to_user((void __user *)arg, list, sizeof(*list)))
+                ret = -EFAULT;
+        }
 
-    if (copy_to_user((void __user *)arg, &stats, sizeof(stats)))
-        ret = -EFAULT;
-    else
-        ret = 0;
+        kfree(list);
+        break;
+    }
 
-    break;
-}
+    case IOCTL_LIST_PROGRAMS: {
+        struct prog_list *list;
+
+        list = kmalloc(sizeof(*list), GFP_KERNEL);
+        if (!list) {
+            ret = -ENOMEM;
+            break;
+        }
+
+        ret = get_prog_list(list);
+        if (!ret) {
+            if (copy_to_user((void __user *)arg, list, sizeof(*list)))
+                ret = -EFAULT;
+        }
+
+        kfree(list);
+        break;
+    }
+
+    case IOCTL_LIST_SYSCALLS: {
+        struct syscall_list *list;
+
+        list = kmalloc(sizeof(*list), GFP_KERNEL);
+        if (!list) {
+            ret = -ENOMEM;
+            break;
+        }
+
+        ret = get_syscall_list(list);
+        if (!ret) {
+            if (copy_to_user((void __user *)arg, list, sizeof(*list)))
+                ret = -EFAULT;
+        }
+
+        kfree(list);
+        break;
+    }
+
+    default:
+        ret = -ENOTTY;
+        break;
+    }
 
     return ret;
 }
