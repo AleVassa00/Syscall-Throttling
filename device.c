@@ -34,6 +34,8 @@
 #define IOCTL_LIST_PROGRAMS  _IOR('a', 12, struct prog_list)
 #define IOCTL_LIST_SYSCALLS  _IOR('a', 13, struct syscall_list)
 
+/*Copia da userspace un valore intero passato come argomento ioctl
+ */
 static int get_int_from_user(unsigned long arg, int *value)
 {
     if (copy_from_user(value, (int __user *)arg, sizeof(int)))
@@ -42,6 +44,8 @@ static int get_int_from_user(unsigned long arg, int *value)
     return 0;
 }
 
+/*Copia da userspace il path dell'eseguibile da registrare/rimuovere
+ */
 static int get_path_from_user(unsigned long arg, char *buf)
 {
     long ret;
@@ -62,6 +66,8 @@ static int get_path_from_user(unsigned long arg, char *buf)
     return 0;
 }
 
+/*Verifica che il thread chiamante stia eseguendo con eUID root
+ */
 static int check_root(void)
 {
     if (!uid_eq(current_euid(), GLOBAL_ROOT_UID))
@@ -70,6 +76,14 @@ static int check_root(void)
     return 0;
 }
 
+/*
+ * Gestisce le ioctl relative ai programmi monitorati
+ - alloca un buffer kernel per il path
+ - copia il path da userspace
+ - aggiunge o rimuove il programma dal registry
+     - add != 0  -> registrazione programma
+     - add == 0  -> rimozione programma
+ */
 static int handle_program_ioctl(unsigned long arg, int add)
 {
     char *prog_path;
@@ -91,94 +105,161 @@ static int handle_program_ioctl(unsigned long arg, int add)
     return ret;
 }
 
-static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+
+/* Funzione di configurazione del Monitor */
+static long device_ioctl(struct file *file,
+                         unsigned int cmd,
+                         unsigned long arg)
 {
     int value;
     int ret;
 
+    /* Verifica che il chiamante abbia privilegi root */
     ret = check_root();
-    if (ret){
+    if (ret)
         return ret;
-    }
+
     switch (cmd) {
+
+    /*Comando che consente di aggiungere una syscall tra quelle monitorate dal modulo
+     - Lettura numero syscall da userspace
+     - Registrazione syscall nel registry
+     - Installazione hook nella syscall table
+     */
     case IOCTL_ADD_SYSCALL:
+
         ret = get_int_from_user(arg, &value);
-        if (ret){
+        if (ret)
             break;
-        }
+
         ret = add_syscall(value);
-        if (ret){
+        if (ret)
             break;
-        }
+
         ret = add_syscall_hook(value);
         if (ret) {
             remove_syscall(value);
             break;
         }
+
         break;
+
+    /*Comando che consente di rimuovere una syscall dal monitor
+     - Rimozione hook syscall
+     - Deregistrazione syscall dal registry
+     */
     case IOCTL_REMOVE_SYSCALL:
+
         ret = get_int_from_user(arg, &value);
         if (ret)
             break;
+
         ret = remove_syscall_hook(value);
         if (ret)
             break;
+
         ret = remove_syscall(value);
-        if (ret){
-            printk(KERN_ERR "[DEVICE] remove_syscall failed after unhook ret=%d\n", ret);
+        if (ret) {
+            printk(KERN_ERR
+                   "[DEVICE] remove_syscall failed after unhook ret=%d\n",
+                   ret);
         }
+
         break;
+
+    /*Comando che consente di aggiungere un UID tra quelli monitorati
+     */
     case IOCTL_ADD_UID:
+
         ret = get_int_from_user(arg, &value);
         if (!ret)
             ret = add_user_id(value);
+
         break;
 
+    /* Comando che consente di rimuovere un UID dall'insieme degli utenti monitorati
+     */
     case IOCTL_REMOVE_UID:
+
         ret = get_int_from_user(arg, &value);
         if (!ret)
             ret = remove_user_id(value);
+
         break;
 
+    /*Comando che consente di registrare un programma monitorato tramite inode dell'eseguibile.
+     */
     case IOCTL_ADD_PROGRAM_NAME:
+
         ret = handle_program_ioctl(arg, 1);
         break;
 
+    /*Comando che consente di rimuovere un programma dall'insieme di quelli monitorati.
+     */
     case IOCTL_REMOVE_PROGRAM_NAME:
+
         ret = handle_program_ioctl(arg, 0);
         break;
 
+    /*Attivazione del monitor syscall throttling
+     Da questo momento:
+     - Le syscall registrate vengono intercettate
+     - Le invocazioni eccedenti MAX vengono bloccate
+     */
     case IOCTL_ENABLE_MONITOR:
+
         monitor_set_enabled(true);
         ret = 0;
         break;
 
+    /*Disattivazione del monitor
+     */
     case IOCTL_DISABLE_MONITOR:
+
         monitor_set_enabled(false);
         ret = 0;
         break;
 
+    /* Aggiornamento dinamico del parametro MAX ovvero il numero massimo di syscall consentite nella finestra temporale di 1 secondo
+     */
     case IOCTL_SET_MAX:
+
         ret = get_int_from_user(arg, &value);
+
         if (!ret) {
-            if (value <= 0)
+
+            if (value <= 0) {
                 ret = -EINVAL;
-            else {
+            } else {
                 monitor_set_max((unsigned long)value);
                 ret = 0;
             }
         }
+
         break;
-    case IOCTL_GET_STATS:{         
+
+    /*Restituzione delle statistiche correnti del monitor
+     */
+    case IOCTL_GET_STATS: {
+
         struct monitor_stats stats;
+
         stats_get(&stats);
-        if (copy_to_user((void __user *)arg, &stats, sizeof(stats)))
+
+        if (copy_to_user((void __user *)arg,
+                         &stats,
+                         sizeof(stats)))
             ret = -EFAULT;
         else
             ret = 0;
+
         break;
     }
+
+    /*Restituzione della lista degli UID monitorati
+     */
     case IOCTL_LIST_UIDS: {
+
         struct uid_list *list;
 
         list = kmalloc(sizeof(*list), GFP_KERNEL);
@@ -188,16 +269,23 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         }
 
         ret = get_uid_list(list);
+
         if (!ret) {
-            if (copy_to_user((void __user *)arg, list, sizeof(*list)))
+            if (copy_to_user((void __user *)arg,
+                             list,
+                             sizeof(*list)))
                 ret = -EFAULT;
         }
 
         kfree(list);
+
         break;
     }
 
+    /*Restituzione della lista dei programmi monitorati
+     */
     case IOCTL_LIST_PROGRAMS: {
+
         struct prog_list *list;
 
         list = kmalloc(sizeof(*list), GFP_KERNEL);
@@ -207,16 +295,23 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         }
 
         ret = get_prog_list(list);
+
         if (!ret) {
-            if (copy_to_user((void __user *)arg, list, sizeof(*list)))
+            if (copy_to_user((void __user *)arg,
+                             list,
+                             sizeof(*list)))
                 ret = -EFAULT;
         }
 
         kfree(list);
+
         break;
     }
 
+    /*Restituzione della lista delle syscall monitorate
+     */
     case IOCTL_LIST_SYSCALLS: {
+
         struct syscall_list *list;
 
         list = kmalloc(sizeof(*list), GFP_KERNEL);
@@ -226,22 +321,31 @@ static long device_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         }
 
         ret = get_syscall_list(list);
+
         if (!ret) {
-            if (copy_to_user((void __user *)arg, list, sizeof(*list)))
+            if (copy_to_user((void __user *)arg,
+                             list,
+                             sizeof(*list)))
                 ret = -EFAULT;
         }
 
         kfree(list);
+
         break;
     }
 
+    /*Comando ioctl non riconosciuto
+     */
     default:
+
         ret = -ENOTTY;
         break;
     }
 
     return ret;
 }
+
+
 
 
 static const struct file_operations fops = {
@@ -255,18 +359,15 @@ static struct miscdevice dev = {
     .fops = &fops,
 };
 
-
+/*Inizializzazione del device Monitor
+    - Misc device usato per esporre /dev/syscall_monitor.
+    - È sufficiente per il progetto perché il modulo necessita di un singolo character device dedicato alle ioctl di configurazione del monitor.
+*/
 
 int device_init(void)
 {
     int ret;
-    /*
-        * Misc device usato per esporre /dev/syscall_monitor.
-        * È sufficiente per il progetto perché il modulo necessita
-        * di un singolo character device dedicato alle ioctl di
-        * configurazione del monitor.
-    */
-
+  
     ret = misc_register(&dev); 
     if (ret) {
         printk(KERN_ERR "[DEVICE] misc_register failed ret=%d\n", ret);

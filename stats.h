@@ -18,11 +18,15 @@ struct monitor_stats {
     unsigned long peak_blocked_threads;
 
     u64 blocked_time_sum_ns;
+    u64 blocking_period_sum_ns;
     u64 monitor_time_ns;
-    unsigned long avg_blocked_threads;
+
+    u64 avg_blocked_threads_global_x1000;
+    u64 avg_blocked_threads_throttle_x1000;
 };
 
 void stats_init(void);
+void stats_reset(bool monitor_is_running);
 void stats_on_monitor_start(void);
 void stats_on_monitor_stop(void);
 

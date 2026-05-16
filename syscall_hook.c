@@ -40,7 +40,7 @@ static unsigned long **sys_call_table;
 static char jump_inst[INST_LEN];
 static char original_inst[INST_LEN];
 static unsigned long x64_sys_call_addr;
-static int x64_sys_call_patched;
+static bool x64_sys_call_patched;
 
 /* CR0 / CR4 */
 static unsigned long cr0_saved;
@@ -194,7 +194,7 @@ static asmlinkage long generic_syscall_hook(const struct pt_regs *regs)
 
 /* ================= Patch x64_sys_call ================= */
 
-static int patch_x64_sys_call(void)
+static int install_syscall_dispatcher_patch(void)
 {
     int offset;
 
@@ -235,14 +235,14 @@ static int patch_x64_sys_call(void)
 
     end_syscall_table_hack();
 
-    x64_sys_call_patched = 1;
+    x64_sys_call_patched = true;
 
     printk(KERN_INFO "%s: x64_sys_call patched\n", MODNAME);
 
     return 0;
 }
 
-static void restore_x64_sys_call(void)
+static void remove_syscall_dispatcher_patch(void)
 {
     if (!x64_sys_call_patched || !x64_sys_call_addr)
         return;
@@ -253,12 +253,16 @@ static void restore_x64_sys_call(void)
 
     end_syscall_table_hack();
 
-    x64_sys_call_patched = 0;
+    x64_sys_call_patched = false;
 
     printk(KERN_INFO "%s: x64_sys_call restored\n", MODNAME);
 }
 
-/* ================= Public API ================= */
+/* Inizializzazione e patch della syscall table 
+    - Inizializzo il contatore che indica le syscall_hookate
+    - Trovo syscall_table
+    - Installo patch del dispatcher
+*/
 
 int syscall_hook_init(void)
 {
@@ -267,19 +271,17 @@ int syscall_hook_init(void)
     hook_count = 0;
     sys_call_table = NULL;
     x64_sys_call_addr = 0;
-    x64_sys_call_patched = 0; //booleano
+    x64_sys_call_patched = false; 
 
     sys_call_table = (unsigned long **)get_symbol_addr("sys_call_table");
     if (!sys_call_table) {
         printk(KERN_ERR "%s: sys_call_table not found\n", MODNAME);
         return -ENOENT;
     }
+    printk(KERN_INFO "%s: sys_call_table at %px\n",MODNAME, sys_call_table);
 
-    printk(KERN_INFO "%s: sys_call_table at %px\n",
-           MODNAME, sys_call_table);
-
-    // forzatura a usare syscall table
-    ret = patch_x64_sys_call(); //
+    
+    ret = install_syscall_dispatcher_patch(); 
     if (ret) {
         printk(KERN_ERR "%s: patch_x64_sys_call failed ret=%d\n",
                MODNAME, ret);
@@ -323,7 +325,7 @@ void syscall_hook_cleanup(void)
 
     write_unlock(&hooks_lock);
 
-    restore_x64_sys_call();
+    remove_syscall_dispatcher_patch();
 
     sys_call_table = NULL;
 

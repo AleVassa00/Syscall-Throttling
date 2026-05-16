@@ -137,37 +137,31 @@ void monitor_set_max(unsigned long val)
 
     WRITE_ONCE(max_calls, val);
 
-    stats_init(); //ATTENZIONE : da rivedere
-
-    printk(KERN_INFO "[MONITOR] MAX set to %lu\n", val);
+    stats_reset(READ_ONCE(monitor_enabled));
+    printk(KERN_INFO "[MONITOR] MAX set to %lu, stats reset\n", val);
 }
-static int is_subject_to_monitor(int nr, kuid_t *uid_out,
-                                  dev_t *dev_out, unsigned long *ino_out)
+static int monitor_match_current_task(int nr,
+                                      kuid_t *uid_out)
 {
     kuid_t uid;
-    dev_t dev = 0;
-    unsigned long ino = 0;
+    dev_t dev;
+    unsigned long ino;
     int ret;
 
-    /* 1. syscall monitorata? bitmap lookup, costo zero */
     if (!is_syscall_monitored(nr))
         return 0;
 
     uid = current_euid();
 
-    /* 2. UID monitorato? hash lookup, veloce */
     if (is_uid_monitored(uid)) {
         *uid_out = uid;
-        *dev_out = dev;
-        *ino_out = ino;
         return 1;
     }
 
-    /* 3. solo se UID non matcha, risolvi l'inode — operazione più costosa */
     ret = get_current_exe_inode(&dev, &ino);
     if (ret) {
-        pr_debug("[MONITOR] get_current_exe_inode failed ret=%d comm=%s\n",
-                 ret, current->comm);
+        pr_info("[MONITOR] get_current_exe_inode failed ret=%d comm=%s\n",
+                ret, current->comm);
         return 0;
     }
 
@@ -175,13 +169,11 @@ static int is_subject_to_monitor(int nr, kuid_t *uid_out,
         return 0;
 
     *uid_out = uid;
-    *dev_out = dev;
-    *ino_out = ino;
 
     return 1;
 }
 
-static int do_throttle(int nr, kuid_t uid)
+static int monitor_throttle_current(int nr, kuid_t uid)
 {
     int was_blocked = 0;
     ktime_t block_start = ktime_get();
@@ -200,7 +192,7 @@ static int do_throttle(int nr, kuid_t uid)
 
                 stats_on_block_end((u64)delay_ns, uid, current->comm);
 
-                pr_debug("[THROTTLE] pid=%d syscall=%d waited_ms=%lld\n",
+                pr_info("[THROTTLE] pid=%d syscall=%d waited_ms=%lld\n",
                          current->pid, nr, delay_ns / 1000000);
             }
 
@@ -216,7 +208,7 @@ static int do_throttle(int nr, kuid_t uid)
 
             stats_on_block_start(&blocked_now, &peak_now);
 
-            pr_debug("[THROTTLE] pid=%d first_block blocked=%lu peak=%lu count=%lu/%lu\n",
+            pr_info("[THROTTLE] pid=%d first_block blocked=%lu peak=%lu count=%lu/%lu\n",
                      current->pid, blocked_now, peak_now,
                      local_count, READ_ONCE(max_calls));
         }
@@ -237,7 +229,7 @@ static int do_throttle(int nr, kuid_t uid)
                 stats_on_block_end((u64)delay_ns, uid, current->comm);
             }
 
-            pr_debug("[THROTTLE] interrupted pid=%d prog=%s\n",
+            pr_info("[THROTTLE] interrupted pid=%d prog=%s\n",
                      current->pid, current->comm);
             return 0;
         }
@@ -252,22 +244,31 @@ static int do_throttle(int nr, kuid_t uid)
 
     return 0;
 }
-
 int should_block(int nr)
 {
     kuid_t uid;
-    dev_t dev;
-    unsigned long ino;
 
-    /* check velocissimo prima di qualsiasi altra cosa */
     if (!READ_ONCE(monitor_enabled))
         return 0;
 
-    if (!is_subject_to_monitor(nr, &uid, &dev, &ino))
+    if (!monitor_match_current_task(nr, &uid))
         return 0;
 
-    return do_throttle(nr, uid);
+    return monitor_throttle_current(nr, uid);
 }
+
+
+
+
+
+/* INIZIALIZZAZIONE DEL MONITOR 
+    -Si utilizza una variabile booleana per tracciare lo stato del monitor inizializzata a false di default 
+    -Definisco una variabile che rappresenta il numero massimo di chiamate all'interno della finestra settata di default a DEFAULT_MAX_CALLS
+    -Inizializzo il contatore globale e finestra;
+    -Setup del timer
+    -Inizializzazione delle stats
+*/
+
 
 int monitor_init(void)
 {
@@ -290,6 +291,8 @@ int monitor_init(void)
     return 0;
 }
 
+/* CLEANUP MONITOR */
+
 
 void monitor_cleanup(void)
 {
@@ -306,14 +309,19 @@ void monitor_cleanup(void)
     printk(KERN_INFO "[MONITOR] cleanup\n");
 
     printk(KERN_INFO
-           "[STATS] peak_delay_ns=%llu peak_delay_us=%llu peak_delay_ms=%llu peak_uid=%d peak_prog=%s blocked_total=%lu currently_blocked=%lu peak_blocked=%lu avg_blocked=%lu\n",
-           s.peak_delay_ns,
-           s.peak_delay_us,
-           s.peak_delay_ms,
-           s.peak_delay_uid,
-           s.peak_delay_comm,
-           s.blocked_threads_total,
-           s.currently_blocked,
-           s.peak_blocked_threads,
-           s.avg_blocked_threads);
+       "[STATS] peak_delay_ns=%llu peak_delay_us=%llu peak_delay_ms=%llu "
+       "peak_uid=%d peak_prog=%s blocked_total=%lu currently_blocked=%lu "
+       "peak_blocked=%lu avg_global=%llu.%03llu avg_throttle=%llu.%03llu\n",
+       s.peak_delay_ns,
+       s.peak_delay_us,
+       s.peak_delay_ms,
+       s.peak_delay_uid,
+       s.peak_delay_comm,
+       s.blocked_threads_total,
+       s.currently_blocked,
+       s.peak_blocked_threads,
+       s.avg_blocked_threads_global_x1000 / 1000,
+       s.avg_blocked_threads_global_x1000 % 1000,
+       s.avg_blocked_threads_throttle_x1000 / 1000,
+       s.avg_blocked_threads_throttle_x1000 % 1000);
 }

@@ -1,6 +1,5 @@
 obj-m += syscall_monitor.o
-syscall_monitor-objs := main.o syscall_hook.o probe.o device.o monitor.o registry.o stats.o
-
+syscall_monitor-objs := main.o syscall_hook.o  probe.o device.o monitor.o registry.o stats.o
 KDIR := /lib/modules/$(shell uname -r)/build
 PWD  := $(shell pwd)
 

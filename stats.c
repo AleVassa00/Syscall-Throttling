@@ -49,11 +49,11 @@ static void update_blocked_time_locked(void)
 
     last_update_time = now;
 }
-void stats_init(void)
-{
-    unsigned long flags;
 
-    spin_lock_irqsave(&stats_lock, flags);
+
+static void stats_reset_locked(bool monitor_is_running)
+{
+    ktime_t now = ktime_get();
 
     blocking_period_sum_ns = 0;
 
@@ -66,12 +66,27 @@ void stats_init(void)
     peak_blocked_threads = 0;
 
     blocked_time_sum_ns = 0;
-    last_update_time = ktime_get();
+    last_update_time = now;
 
-    monitor_stats_running = false;
-    monitor_start_time = 0;
     accumulated_monitor_time_ns = 0;
 
+    monitor_stats_running = monitor_is_running;
+    monitor_start_time = monitor_is_running ? now : 0;
+}
+void stats_init(void)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&stats_lock, flags);
+    stats_reset_locked(false);
+    spin_unlock_irqrestore(&stats_lock, flags);
+}
+void stats_reset(bool monitor_is_running)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&stats_lock, flags);
+    stats_reset_locked(monitor_is_running);
     spin_unlock_irqrestore(&stats_lock, flags);
 }
 
@@ -206,13 +221,26 @@ void stats_get(struct monitor_stats *out)
     out->peak_blocked_threads = peak_blocked_threads;
 
     out->blocked_time_sum_ns = blocked_time_sum_ns;
+    out->blocking_period_sum_ns = blocking_period_sum_ns;
     out->monitor_time_ns = total_monitor_time_ns;
 
-    if (blocking_period_sum_ns > 0)
-        out->avg_blocked_threads =
-            div64_u64(blocked_time_sum_ns, blocking_period_sum_ns);
-    else
-        out->avg_blocked_threads = 0;
+    if (total_monitor_time_ns > 0){
+        out->avg_blocked_threads_global_x1000 =
+            div64_u64(blocked_time_sum_ns * 1000,
+                      total_monitor_time_ns);
+    }
+    else{
+        out->avg_blocked_threads_global_x1000 = 0;
+    }
+
+    if (blocking_period_sum_ns > 0){
+        out->avg_blocked_threads_throttle_x1000 =
+            div64_u64(blocked_time_sum_ns * 1000,
+                      blocking_period_sum_ns);
+    }
+    else{
+        out->avg_blocked_threads_throttle_x1000 = 0;
+    }
 
     spin_unlock_irqrestore(&stats_lock, flags);
-}
+ }
