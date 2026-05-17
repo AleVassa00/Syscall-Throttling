@@ -51,25 +51,18 @@ static int uid_count;
 static int prog_count;
 
 /* ================ HASH_KEY ============= */
-/*
- * Calcola la chiave hash associata ad un UID.
- *
- * La chiave viene ricavata dal valore numerico del kuid_t
- * e viene usata per indicizzare la tabella hash degli UID monitorati.
- */
+/*Calcola la chiave hash associata ad un UID
+La chiave viene ricavata dal valore numerico del kuid_t e viene usata per indicizzare la tabella hash degli UID monitorati.
+*/
 static u32 uid_hash_key(kuid_t uid)
 {
     return __kuid_val(uid);
 }
 
-/*
- * Calcola la chiave hash associata ad un programma monitorato.
- *
- * Il programma viene identificato tramite:
- *   - device del filesystem
- *   - inode dell'eseguibile
- *
- * Questo evita di dipendere dal path testuale del programma.
+/*Calcola la chiave hash associata ad un programma monitorato
+ Il programma viene identificato tramite:
+ - device del filesystem
+ - inode dell'eseguibile
  */
 static u32 prog_hash_key(dev_t dev, unsigned long ino)
 {
@@ -83,17 +76,13 @@ static u32 prog_hash_key(dev_t dev, unsigned long ino)
     return key;
 }
 
-
 /* ================= UID ================= */
 
-/*
- * Aggiunge un UID all'insieme degli utenti monitorati.
- *
- * La tabella degli UID usa:
- *   - spinlock per serializzare gli scrittori
- *   - RCU per consentire letture lock-free nel path caldo
- *
- * La funzione controlla anche duplicati e limite massimo MAX_UIDS.
+/*Aggiunge un UID all'insieme degli utenti monitorati.
+ La tabella degli UID usa:
+ -spinlock per serializzare gli scrittori
+ -RCU per consentire letture lock-free nel path caldo
+ La funzione controlla anche duplicati e limite massimo MAX_UIDS.
  */
 int add_user_id(int uid)
 {
@@ -104,8 +93,9 @@ int add_user_id(int uid)
     unsigned long flags;
 
     entry = kzalloc(sizeof(*entry), GFP_KERNEL);
-    if (!entry)
+    if (!entry){
         return -ENOMEM;
+    }
 
     entry->uid = kuid;
 
@@ -134,13 +124,9 @@ int add_user_id(int uid)
 
     return 0;
 }
-/*
- * Rimuove un UID dall'insieme degli utenti monitorati.
- *
- * La rimozione avviene tramite hash_del_rcu(), mentre la memoria
- * viene liberata con kfree_rcu() per evitare use-after-free da parte
- * di lettori RCU ancora attivi.
- */
+/*Rimuove un UID dall'insieme degli utenti monitorati
+ La rimozione avviene tramite hash_del_rcu(), mentre la memoria viene liberata con kfree_rcu() per evitare use-after-free da parte di lettori RCU ancora attivi.
+*/
 int remove_user_id(int uid)
 {
     struct monitored_uid *entry;
@@ -171,12 +157,9 @@ int remove_user_id(int uid)
     return -ENOENT;
 }
 
-/*
- * Verifica se l'effective UID corrente è monitorato.
- *
- * Questa funzione viene invocata nel path caldo del monitor,
- * quindi usa RCU per evitare lock pesanti durante le syscall.
- */
+/*Verifica se l'effective UID corrente è monitorato
+ Questa funzione viene invocata nel path caldo del monitor, quindi usa RCU per evitare lock pesanti durante le syscall.
+*/
 int is_uid_monitored(kuid_t uid){
     struct monitored_uid *entry;
     u32 key = uid_hash_key(uid);
@@ -199,13 +182,10 @@ int is_uid_monitored(kuid_t uid){
 
 /* ================= PROGRAM INODE ================= */
 
-/*
- * Risolve il path di un eseguibile nella coppia device/inode.
- *
- * Internamente il registry non confronta il nome del programma,
- * ma l'identità reale del file eseguibile:
- *   - dev: device del filesystem
- *   - ino: inode del file
+/*Risolve il path di un eseguibile nella coppia device/inode.
+ Internamente il registry non confronta il nome del programma, ma l'identità reale del file eseguibile:
+ - dev: device del filesystem
+ - ino: inode del file
  */
 
 static int resolve_path_inode(const char *prog_path, dev_t *dev, unsigned long *ino)
@@ -238,13 +218,9 @@ static int resolve_path_inode(const char *prog_path, dev_t *dev, unsigned long *
     return 0;
 }
 
-/*
- * Aggiunge un programma all'insieme dei programmi monitorati.
- *
- * Il path ricevuto viene risolto in device/inode e solo questa coppia
- * viene usata per il matching runtime. Il nome viene salvato solo
- * come informazione ausiliaria/debug.
- */
+/*Aggiunge un programma all'insieme dei programmi monitorati
+ - Il path ricevuto viene risolto in device/inode e solo questa coppia viene usata per il matching runtime. Il nome viene salvato solo come informazione ausiliaria/debug.
+*/
 
 int add_prog_inode(const char *prog_path)
 {
@@ -300,13 +276,11 @@ int add_prog_inode(const char *prog_path)
     return 0;
 }
 
-/*
- * Rimuove un programma dall'insieme dei programmi monitorati.
- *
- * Come per gli UID, la rimozione usa RCU:
- *   - hash_del_rcu() scollega il nodo dalla tabella
- *   - kfree_rcu() libera la memoria solo dopo il grace period
- */
+/*Rimuove un programma dall'insieme dei programmi monitorati.
+ Come per gli UID, la rimozione usa RCU:
+ - hash_del_rcu() scollega il nodo dalla tabella
+ - kfree_rcu() libera la memoria solo dopo il grace period
+*/
 
 int remove_prog_inode(const char *prog_path)
 {
@@ -352,12 +326,9 @@ int remove_prog_inode(const char *prog_path)
     return -ENOENT;
 }
 
-/*
- * Verifica se il programma corrente è monitorato tramite device/inode.
- *
- * È una funzione del path caldo: viene chiamata durante il controllo
- * delle syscall, quindi usa RCU per minimizzare l'overhead.
- */
+/*Verifica se il programma corrente è monitorato tramite device/inode.
+ È una funzione del path caldo: viene chiamata durante il controllo delle syscall, quindi usa RCU per minimizzare l'overhead.
+*/
 
 int is_prog_inode_monitored(dev_t dev, unsigned long ino)
 {
@@ -381,16 +352,12 @@ int is_prog_inode_monitored(dev_t dev, unsigned long ino)
 
 /* ================= SYSCALL ================= */
 
-/*
- * Aggiunge una syscall alla bitmap delle syscall monitorate.
- *
- * test_and_set_bit() esegue atomicamente:
- *   - lettura del valore precedente
- *   - set del bit
- *
- * In questo modo non serve un lock esplicito per evitare race tra
- * due ioctl concorrenti che aggiungono la stessa syscall.
- */
+/*Aggiunge una syscall alla bitmap delle syscall monitorate.
+ test_and_set_bit() esegue atomicamente:
+ - lettura del valore precedente
+ - set del bit
+In questo modo non serve un lock esplicito per evitare race tra due ioctl concorrenti che aggiungono la stessa syscall.
+*/
 int add_syscall(int nr)
 {
     if (nr < 0 || nr >= MAX_SYSCALLS)
@@ -404,15 +371,12 @@ int add_syscall(int nr)
     return 0;
 }
 
-/*
- * Rimuove una syscall dalla bitmap delle syscall monitorate.
- *
- * test_and_clear_bit() esegue atomicamente:
- *   - lettura del valore precedente
- *   - clear del bit
- *
- * Se il bit era già a 0, la syscall non era registrata.
- */
+/*Rimuove una syscall dalla bitmap delle syscall monitorate.
+ test_and_clear_bit() esegue atomicamente:
+ - lettura del valore precedente
+ - clear del bit
+ Se il bit era già a 0, la syscall non era registrata.
+*/
 int remove_syscall(int nr)
 {
     if (nr < 0 || nr >= MAX_SYSCALLS)
@@ -426,12 +390,9 @@ int remove_syscall(int nr)
     return 0;
 }
 
-/*
- * Verifica se una syscall è monitorata.
- *
- * La lettura della bitmap è lock-free tramite test_bit(), così il
- * controllo resta molto veloce nel path caldo del monitor.
- */
+/*Verifica se una syscall è monitorata
+ La lettura della bitmap è lock-free tramite test_bit(), così il controllo resta molto veloce nel path caldo del monitor.
+*/
 int is_syscall_monitored(int nr)
 {
     if (nr < 0 || nr >= MAX_SYSCALLS)
@@ -440,16 +401,12 @@ int is_syscall_monitored(int nr)
     return test_bit(nr, monitored_syscalls);
 }
  
-/*
- * Libera tutte le strutture dinamiche del registry.
- *
- * UID e programmi sono rimossi con primitive RCU:
- *   - hash_del_rcu()
- *   - kfree_rcu()
- *
- * synchronize_rcu() assicura che eventuali lettori RCU ancora attivi
- * abbiano terminato prima della conclusione della cleanup.
- */
+/*Libera tutte le strutture dinamiche del registry
+ UID e programmi sono rimossi con primitive RCU:
+ - hash_del_rcu()
+ - kfree_rcu()
+ synchronize_rcu() assicura che eventuali lettori RCU ancora attivi abbiano terminato prima della conclusione della cleanup.
+*/
 void registry_cleanup(void)
 {
     int bkt;
@@ -484,16 +441,12 @@ void registry_cleanup(void)
     synchronize_rcu();
 }
 
-/*
- * Copia nella struttura di output la lista degli UID monitorati.
- *
- * La lettura della tabella avviene tramite RCU:
- *   - non blocca eventuali lettori nel path caldo
- *   - consente di attraversare la hash table in modo sicuro
- *     anche se un writer rimuove un UID in parallelo
- *
- * La funzione restituisce uno snapshot della configurazione corrente.
- */
+/*Copia nella struttura di output la lista degli UID monitorati.
+ La lettura della tabella avviene tramite RCU:
+ - non blocca eventuali lettori nel path caldo
+ - consente di attraversare la hash table in modo sicuro anche se un writer rimuove un UID in parallelo
+ La funzione restituisce uno snapshot della configurazione corrente.
+*/
 
 int get_uid_list(struct uid_list *out)
 {
@@ -520,16 +473,12 @@ int get_uid_list(struct uid_list *out)
     return 0;
 }
 
-/*
- * Copia in una struttura di output la lista dei programmi monitorati.
- *
- * I programmi sono esportati tramite coppia:
- *   - major/minor del device
- *   - inode dell'eseguibile
- *
- * Questa rappresentazione evita dipendenza dal path testuale,
- * che può cambiare nel filesystem.
- */
+/*Copia in una struttura di output la lista dei programmi monitorati.
+ I programmi sono esportati tramite coppia:
+ - major/minor del device
+ - inode dell'eseguibile
+ Questa rappresentazione evita dipendenza dal path testuale,che può cambiare nel filesystem.
+*/
 int get_prog_list(struct prog_list *out)
 {
     struct monitored_prog *entry;
@@ -558,14 +507,9 @@ int get_prog_list(struct prog_list *out)
     return 0;
 }
 
-/*
- * Copia in userspace la lista delle syscall monitorate.
- *
- * La funzione scorre la bitmap e costruisce uno snapshot della
- * configurazione corrente. Lo snapshot può non essere perfettamente
- * atomico rispetto ad add/remove concorrenti, ma è sufficiente per
- * una ioctl di sola lettura.
- */
+/*Copia in userspace la lista delle syscall monitorate.
+ La funzione scorre la bitmap e costruisce uno snapshot della configurazione corrente. Lo snapshot può non essere perfettamente atomico rispetto ad add/remove concorrenti, ma è sufficiente per una ioctl di sola lettura.
+*/
 int get_syscall_list(struct syscall_list *out)
 {
     int nr;

@@ -31,7 +31,6 @@
 #define MAX_UIDS     64
 #define MAX_PROGS    64
 #define MAX_SYSCALLS 512
-
 struct monitor_stats {
     unsigned long long peak_delay_ns;
     unsigned long long peak_delay_us;
@@ -40,16 +39,8 @@ struct monitor_stats {
     int peak_delay_uid;
     char peak_delay_comm[16];
 
-    unsigned long blocked_threads_total;
-    unsigned long currently_blocked;
+    unsigned long long avg_blocked_threads_x1000;
     unsigned long peak_blocked_threads;
-
-    unsigned long long blocked_time_sum_ns;
-    unsigned long long blocking_period_sum_ns;
-    unsigned long long monitor_time_ns;
-
-    unsigned long long avg_blocked_threads_global_x1000;
-    unsigned long long avg_blocked_threads_throttle_x1000;
 };
 
 struct uid_list {
@@ -267,16 +258,15 @@ int main(void)
                     stats.peak_delay_ns,
                     stats.peak_delay_us,
                     stats.peak_delay_ms);
-
                 printf("Peak delay process: %s\n", stats.peak_delay_comm);
                 printf("Peak delay UID: %d\n", stats.peak_delay_uid);
+                printf("Average blocked threads: %llu.%03llu\n",
+                    stats.avg_blocked_threads_x1000 / 1000,
+                    stats.avg_blocked_threads_x1000 % 1000);
 
-                printf("Blocked total: %lu\n", stats.blocked_threads_total);
-                printf("Currently blocked: %lu\n", stats.currently_blocked);
-                printf("Peak blocked threads: %lu\n", stats.peak_blocked_threads);
-                printf("avg blocked global:   %llu.%03llu\n",stats.avg_blocked_threads_global_x1000 / 1000,stats.avg_blocked_threads_global_x1000 % 1000);
-                printf("avg blocked throttle: %llu.%03llu\n",stats.avg_blocked_threads_throttle_x1000 / 1000,stats.avg_blocked_threads_throttle_x1000 % 1000);            }
-
+                printf("Peak blocked threads: %lu\n",
+                    stats.peak_blocked_threads);
+            }
             break;
         }
         case 11: {

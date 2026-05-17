@@ -1,5 +1,6 @@
 #include <linux/sched.h>
 #include <linux/spinlock.h>
+#include <linux/module.h>
 #include <linux/cred.h>
 #include <linux/fs.h>
 #include <linux/file.h>
@@ -11,6 +12,7 @@
 #include <linux/hrtimer.h>
 #include <linux/ktime.h>
 #include <asm/unistd.h>
+
 
 #include "monitor.h"
 #include "registry.h"
@@ -31,6 +33,14 @@ static unsigned long window_generation;
 static DECLARE_WAIT_QUEUE_HEAD(throttle_wq);
 static struct hrtimer window_timer;
 
+
+/*Recupera device e inode dell'eseguibile associato al task corrente
+ La funzione legge current->mm->exe_file all'interno di una sezione RCU per evitare problemi di concorrenza
+ legati alla possibile sostituzione o liberazione delle strutture mm/exe_file durante la lettura
+ L'identificazione del programma avviene tramite:
+ - device del filesystem
+ - inode dell'eseguibile
+*/
 static int get_current_exe_inode(dev_t *dev, unsigned long *ino)
 {
     struct inode *inode;
@@ -58,6 +68,13 @@ static int get_current_exe_inode(dev_t *dev, unsigned long *ino)
 
     return 0;
 }
+/*Callback del timer ad alta risoluzione.
+ La callback definisce il cambio di finestra temporale:
+ - resetta il contatore globale
+ - incrementa la generation corrente
+ - riattiva il timer periodico
+ I thread bloccati vengono risvegliati tramite wait queue.
+*/
 
 static enum hrtimer_restart window_timer_callback(struct hrtimer *t)
 {
@@ -84,9 +101,16 @@ static enum hrtimer_restart window_timer_callback(struct hrtimer *t)
 
     return HRTIMER_NORESTART;
 }
+/*Tenta di consumare uno slot disponibile nella finestra corrente
+ La funzione protegge global_count tramite spinlock perché:
+ - più thread possono invocare syscall contemporaneamente
+ - il timer può resettare il contatore in parallelo
+ Restituisce:
+ - 1 se lo slot viene assegnato
+ - 0 se il limite MAX è stato raggiunto
+*/
 
-
-static int try_consume_slot(unsigned long *count_snapshot)
+static int try_consume_slot(void)
 {
     unsigned long flags;
     int allowed = 0;
@@ -98,38 +122,81 @@ static int try_consume_slot(unsigned long *count_snapshot)
         allowed = 1;
     }
 
-    if (count_snapshot)
-        *count_snapshot = global_count;
-
     spin_unlock_irqrestore(&counter_lock, flags);
 
     return allowed;
 }
 
-void monitor_set_enabled(bool val)
+/*
+ * Abilita o disabilita il monitor syscall throttling.
+ *
+ * In fase di abilitazione:
+ *   - resetta il contatore globale
+ *   - avvia il timer periodico
+ *   - inizializza una nuova finestra logica
+ *
+ * In fase di disabilitazione:
+ *   - cancella il timer
+ *   - risveglia eventuali thread bloccati
+ */
+
+void monitor_enable(void)
 {
     unsigned long flags;
-    bool enabled = val;
 
-    if (enabled) {
-        spin_lock_irqsave(&counter_lock, flags);
-        global_count = 0;
-        window_generation++;
-        WRITE_ONCE(monitor_enabled, true);
-        hrtimer_start(&window_timer, ms_to_ktime(WINDOW_MS), HRTIMER_MODE_REL);
+    spin_lock_irqsave(&counter_lock, flags);
+
+    if (READ_ONCE(monitor_enabled)) {
         spin_unlock_irqrestore(&counter_lock, flags);
-        stats_on_monitor_start();
-    } else {
-        WRITE_ONCE(monitor_enabled, false);
-        hrtimer_cancel(&window_timer);
-        wake_up_all(&throttle_wq);
-        stats_on_monitor_stop();
+        printk(KERN_INFO "[MONITOR] already ENABLED\n");
+        return;
     }
 
-    printk(KERN_INFO "[MONITOR] %s\n",
-           enabled ? "ENABLED" : "DISABLED");
+    global_count = 0;
+    window_generation++;
+    WRITE_ONCE(monitor_enabled, true);
+
+    hrtimer_start(&window_timer,ms_to_ktime(WINDOW_MS),HRTIMER_MODE_REL);
+
+    spin_unlock_irqrestore(&counter_lock, flags);
+
+    stats_on_monitor_start();
+
+    printk(KERN_INFO "[MONITOR] ENABLED\n");
 }
 
+void monitor_disable(void)
+{
+    unsigned long flags;
+
+    spin_lock_irqsave(&counter_lock, flags);
+
+    if (!READ_ONCE(monitor_enabled)) {
+        spin_unlock_irqrestore(&counter_lock, flags);
+        printk(KERN_INFO "[MONITOR] already DISABLED\n");
+        return;
+    }
+
+    WRITE_ONCE(monitor_enabled, false);
+
+    spin_unlock_irqrestore(&counter_lock, flags);
+
+    hrtimer_cancel(&window_timer);
+    wake_up_all(&throttle_wq);
+    stats_on_monitor_stop();
+
+    printk(KERN_INFO "[MONITOR] DISABLED\n");
+}
+
+/*
+ * Aggiorna dinamicamente il parametro MAX.
+ *
+ * MAX rappresenta il numero massimo di syscall consentite
+ * all'interno della finestra temporale corrente.
+ *
+ * Il cambio di configurazione provoca anche il reset
+ * delle statistiche runtime.
+ */
 void monitor_set_max(unsigned long val)
 {
     if (val == 0)
@@ -140,8 +207,18 @@ void monitor_set_max(unsigned long val)
     stats_reset(READ_ONCE(monitor_enabled));
     printk(KERN_INFO "[MONITOR] MAX set to %lu, stats reset\n", val);
 }
-static int monitor_match_current_task(int nr,
-                                      kuid_t *uid_out)
+
+
+
+/*Verifica se il task corrente deve essere monitorato
+ Il controllo avviene in due fasi:
+ - verifica syscall monitorata
+ - verifica UID oppure programma monitorato
+ Restituisce:
+ - 1 se il task deve essere sottoposto a throttling
+ - 0 altrimenti
+*/
+static int monitor_match_current_task(int nr)
 {
     kuid_t uid;
     dev_t dev;
@@ -154,26 +231,35 @@ static int monitor_match_current_task(int nr,
     uid = current_euid();
 
     if (is_uid_monitored(uid)) {
-        *uid_out = uid;
         return 1;
     }
 
     ret = get_current_exe_inode(&dev, &ino);
     if (ret) {
-        pr_info("[MONITOR] get_current_exe_inode failed ret=%d comm=%s\n",
-                ret, current->comm);
+        pr_info("[MONITOR] get_current_exe_inode failed ret=%d comm=%s\n",ret, current->comm);
         return 0;
     }
 
-    if (!is_prog_inode_monitored(dev, ino))
-        return 0;
+    if (is_prog_inode_monitored(dev, ino))
+        return 1;
 
-    *uid_out = uid;
-
-    return 1;
+    return 0;
 }
 
-static int monitor_throttle_current(int nr, kuid_t uid)
+
+
+/*Implementa il meccanismo di throttling vero e proprio.
+ Il thread:
+ - tenta di consumare uno slot nella finestra corrente
+ - se il limite è raggiunto entra in wait queue
+ - viene risvegliato al cambio finestra
+ La sincronizzazione utilizza:
+ - wait queue
+ - window_generation
+ - timer periodico
+ Le statistiche di blocco vengono aggiornate sia all'ingresso che all'uscita dalla fase di attesa.
+*/
+static int monitor_throttle_current(int nr)
 {
     int was_blocked = 0;
     ktime_t block_start = ktime_get();
@@ -182,91 +268,93 @@ static int monitor_throttle_current(int nr, kuid_t uid)
 
     while (READ_ONCE(monitor_enabled)) {
 
-        unsigned long local_count = 0;
-
-        if (try_consume_slot(&local_count)) {
+        if (try_consume_slot()) {
 
             if (was_blocked) {
-                s64 delay_ns = ktime_to_ns(
-                    ktime_sub(ktime_get(), block_start));
 
-                stats_on_block_end((u64)delay_ns, uid, current->comm);
-
-                pr_info("[THROTTLE] pid=%d syscall=%d waited_ms=%lld\n",
-                         current->pid, nr, delay_ns / 1000000);
+                s64 delay_ns = ktime_to_ns(ktime_sub(ktime_get(), block_start));
+                stats_on_block_end((u64)delay_ns, current_euid(), current->comm);
+                pr_info("[THROTTLE] pid=%d syscall=%d waited_ms=%lld\n",current->pid, nr, delay_ns / 1000000);
             }
 
             return 0;
         }
 
-        /* prima volta che non trova slot */
+        // prima volta che non trova slot
         if (!was_blocked) {
-            unsigned long blocked_now, peak_now;
 
+            unsigned long blocked_now, peak_now;
             was_blocked = 1;
             block_start = ktime_get();
-
             stats_on_block_start(&blocked_now, &peak_now);
-
-            pr_info("[THROTTLE] pid=%d first_block blocked=%lu peak=%lu count=%lu/%lu\n",
-                     current->pid, blocked_now, peak_now,
-                     local_count, READ_ONCE(max_calls));
+            pr_info("[THROTTLE] pid=%d first_block blocked=%lu peak=%lu\n",current->pid,blocked_now,peak_now);
         }
 
         my_generation = READ_ONCE(window_generation);
-
-        ret = wait_event_interruptible(
-            throttle_wq,
-            READ_ONCE(window_generation) != my_generation ||
-            !READ_ONCE(monitor_enabled)
-        );
-
-        /* segnale ricevuto — non bloccare la syscall, lascia passare */
+        ret = wait_event_interruptible(throttle_wq,READ_ONCE(window_generation) != my_generation ||!READ_ONCE(monitor_enabled));
         if (ret) {
+
             if (was_blocked) {
-                s64 delay_ns = ktime_to_ns(
-                    ktime_sub(ktime_get(), block_start));
-                stats_on_block_end((u64)delay_ns, uid, current->comm);
+
+                s64 delay_ns = ktime_to_ns(ktime_sub(ktime_get(), block_start));
+                stats_on_block_end((u64)delay_ns, current_euid(), current->comm);
             }
 
-            pr_info("[THROTTLE] interrupted pid=%d prog=%s\n",
-                     current->pid, current->comm);
-            return 0;
+            pr_info("[THROTTLE] interrupted pid=%d prog=%s\n",current->pid, current->comm);
+            return ret;
         }
     }
 
-    /* monitor disabilitato mentre aspettavamo */
+    /* monitor disabilitato */
     if (was_blocked) {
         s64 delay_ns = ktime_to_ns(
             ktime_sub(ktime_get(), block_start));
-        stats_on_block_end((u64)delay_ns, uid, current->comm);
+        stats_on_block_end((u64)delay_ns, current_euid(), current->comm);
     }
 
     return 0;
 }
+
+/*Punto di ingresso principale del monitor.
+ La funzione:
+ - verifica se il monitor è attivo
+ - controlla se il task corrente deve essere monitorato
+ - applica eventualmente il throttling
+ Viene invocata dal wrapper generico delle syscall hookate.
+*/
+
 int should_block(int nr)
 {
-    kuid_t uid;
+    int ret;
 
-    if (!READ_ONCE(monitor_enabled))
+    if (!try_module_get(THIS_MODULE))
         return 0;
 
-    if (!monitor_match_current_task(nr, &uid))
+    if (!READ_ONCE(monitor_enabled)) {
+        module_put(THIS_MODULE);
         return 0;
+    }
 
-    return monitor_throttle_current(nr, uid);
+    if (!monitor_match_current_task(nr)) {
+        module_put(THIS_MODULE);
+        return 0;
+    }
+
+    ret = monitor_throttle_current(nr);
+
+    module_put(THIS_MODULE);
+
+    return ret;
 }
 
 
 
-
-
-/* INIZIALIZZAZIONE DEL MONITOR 
-    -Si utilizza una variabile booleana per tracciare lo stato del monitor inizializzata a false di default 
-    -Definisco una variabile che rappresenta il numero massimo di chiamate all'interno della finestra settata di default a DEFAULT_MAX_CALLS
-    -Inizializzo il contatore globale e finestra;
-    -Setup del timer
-    -Inizializzazione delle stats
+/*Inizializzazione Monitor 
+ -Si utilizza una variabile booleana per tracciare lo stato del monitor inizializzata a false di default 
+ -Definisco una variabile che rappresenta il numero massimo di chiamate all'interno della finestra settata di default a DEFAULT_MAX_CALLS
+ -Inizializzo il contatore globale e finestra;
+ -Setup del timer
+ -Inizializzazione delle stats
 */
 
 
@@ -310,18 +398,13 @@ void monitor_cleanup(void)
 
     printk(KERN_INFO
        "[STATS] peak_delay_ns=%llu peak_delay_us=%llu peak_delay_ms=%llu "
-       "peak_uid=%d peak_prog=%s blocked_total=%lu currently_blocked=%lu "
-       "peak_blocked=%lu avg_global=%llu.%03llu avg_throttle=%llu.%03llu\n",
+       "peak_uid=%d peak_prog=%s avg_blocked=%llu.%03llu peak_blocked=%lu\n",
        s.peak_delay_ns,
        s.peak_delay_us,
        s.peak_delay_ms,
        s.peak_delay_uid,
        s.peak_delay_comm,
-       s.blocked_threads_total,
-       s.currently_blocked,
-       s.peak_blocked_threads,
-       s.avg_blocked_threads_global_x1000 / 1000,
-       s.avg_blocked_threads_global_x1000 % 1000,
-       s.avg_blocked_threads_throttle_x1000 / 1000,
-       s.avg_blocked_threads_throttle_x1000 % 1000);
+       s.avg_blocked_threads_x1000 / 1000,
+       s.avg_blocked_threads_x1000 % 1000,
+       s.peak_blocked_threads);
 }

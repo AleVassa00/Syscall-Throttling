@@ -6,7 +6,8 @@
 int monitor_init(void);
 void monitor_cleanup(void);
 
-void monitor_set_enabled(bool val);
+void monitor_enable(void);
+void monitor_disable(void);
 void monitor_set_max(unsigned long val);
                                
 

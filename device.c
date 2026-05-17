@@ -208,7 +208,7 @@ static long device_ioctl(struct file *file,
      */
     case IOCTL_ENABLE_MONITOR:
 
-        monitor_set_enabled(true);
+        monitor_enable();
         ret = 0;
         break;
 
@@ -216,7 +216,7 @@ static long device_ioctl(struct file *file,
      */
     case IOCTL_DISABLE_MONITOR:
 
-        monitor_set_enabled(false);
+        monitor_disable();
         ret = 0;
         break;
 

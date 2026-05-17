@@ -187,7 +187,13 @@ static asmlinkage long generic_syscall_hook(const struct pt_regs *regs)
      * should_block() ritarda il thread se supera MAX.
      * Poi la syscall originale viene comunque eseguita.
      */
-    should_block(nr);
+    int throttle_ret;
+
+    throttle_ret = should_block(nr);
+    if (throttle_ret){
+        pr_info("[HOOK] syscall=%d aborted by throttle ret=%d\n", nr, throttle_ret);
+        return throttle_ret;
+    }
 
     return ((asmlinkage long (*)(const struct pt_regs *))original)(regs);
 }
