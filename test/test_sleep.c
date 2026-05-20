@@ -5,7 +5,7 @@ int main(void)
 {
     while (1) {
         getpid();
+        getpid();   
+        sleep(5);   
     }
-
-    return 0;
 }

@@ -12,12 +12,11 @@
 
 #include <asm/processor-flags.h>
 #include <asm/special_insns.h>
+#include <asm/unistd.h>
 
 #include "syscall_hook.h"
 #include "probe.h"
 #include "monitor.h"
-
-#include <asm/unistd.h>
 
 #define MODNAME        "SYSCALL_MONITOR"
 #define MAX_HOOKS      __NR_syscalls
@@ -27,9 +26,13 @@
 struct syscall_hook {
     int nr;
     unsigned long original;
-    int active;
+    bool active;
 };
 
+/*
+ * hooks[nr] contiene la struttura associata alla syscall nr.
+ * Questo evita la ricerca lineare e rende il lookup O(1).
+ */
 static struct syscall_hook *hooks[MAX_HOOKS];
 static int hook_count;
 static DEFINE_RWLOCK(hooks_lock);
@@ -90,6 +93,12 @@ static inline void conditional_cet_enable(void)
 #endif
 }
 
+/*Disabilita temporaneamente le protezioni hardware necessarie per modificare codice kernel read-only
+ *- disabilita la preemption
+ *- salva CR0/CR4
+ *- disabilita CET se presente
+ *- rimuove il bit Write Protect da CR0
+*/
 static inline void begin_syscall_table_hack(void)
 {
     preempt_disable();
@@ -100,8 +109,9 @@ static inline void begin_syscall_table_hack(void)
     conditional_cet_disable();
     unprotect_memory();
 }
+/*Ripristina le protezioni hardware precedentemente disabilitate da begin_syscall_table_hack()
 
-static inline void end_syscall_table_hack(void)
+ */static inline void end_syscall_table_hack(void)
 {
     protect_memory();
     conditional_cet_enable();
@@ -109,20 +119,12 @@ static inline void end_syscall_table_hack(void)
     preempt_enable();
 }
 
-/* ================= Dispatcher restore via syscall table ================= */
-
-/*
- * Questa è la parte del prof adattata al tuo codice.
- *
- * x64_sys_call normalmente riceve:
- *   regs = struct pt_regs *
- *   nr   = syscall number
- *
- * Noi patchiamo l'inizio di x64_sys_call per saltare qui.
- * Questa funzione non deve "returnare" normalmente.
- * Deve saltare alla syscall contenuta in sys_call_table[nr].
- */
-static __always_inline void __noreturn call(struct pt_regs *regs, unsigned int nr)
+/*Dispatcher custom utilizzato dopo la patch di x64_sys_call
+ La funzione recupera dalla syscall table la funzione associata al numero nr ed effettua
+ un jump diretto verso la syscall selezionata
+ Non ritorna mai al chiamante.
+*/
+static __always_inline void __noreturn call(struct pt_regs *regs,unsigned int nr)
 {
     asm volatile(
         "mov (%1, %0, 8), %%rax\n\t"
@@ -134,74 +136,84 @@ static __always_inline void __noreturn call(struct pt_regs *regs, unsigned int n
 
     __builtin_unreachable();
 }
+
 /* ================= Hook registry ================= */
-
-static struct syscall_hook *find_hook_nolock(int nr)
-{
-    int i;
-
-    for (i = 0; i < hook_count; i++) {
-        if (hooks[i] && hooks[i]->nr == nr)
-            return hooks[i];
-    }
-
-    return NULL;
-}
-
+/*Restituisce il puntatore alla syscall originale associata al numero nr.
+ -Il lookup avviene in O(1) tramite l'array hooks[nr].
+ -Il read_lock protegge l'accesso concorrente rispetto ad add/remove hook e cleanup del modulo.
+*/
 static unsigned long get_original_syscall(int nr)
 {
     struct syscall_hook *h;
     unsigned long original = 0;
 
+    if (nr < 0 || nr >= MAX_HOOKS)
+        return 0;
+
     read_lock(&hooks_lock);
 
-    h = find_hook_nolock(nr);
-    if (h && h->active)
+    h = hooks[nr];
+    if (h && h->active){
         original = h->original;
+    }
 
     read_unlock(&hooks_lock);
 
     return original;
 }
 
-/* ================= Generic syscall wrapper ================= */
-
+/*Wrapper generico installato nella syscall table per tutte le syscall monitorate.
+  - recupera il numero della syscall corrente
+  - ottiene il puntatore originale salvato
+  - applica il monitor/throttling
+  - esegue la syscall reale
+ Se il throttling viene interrotto da un segnale, la syscall originale NON viene invocata e viene restituito l'errore propagato dal monitor.
+*/
 static asmlinkage long generic_syscall_hook(const struct pt_regs *regs)
 {
     int nr;
+    int throttle_ret;
     unsigned long original;
+    long ret;
 
     if (!regs)
         return -EINVAL;
+
+    if (!try_module_get(THIS_MODULE))
+        return -ENODEV;
 
     nr = regs->orig_ax;
 
     original = get_original_syscall(nr);
     if (!original) {
-        printk(KERN_ERR "%s: original syscall not found for nr=%d\n",
-               MODNAME, nr);
-        return -ENOSYS;
+        ret = -ENOSYS;
+        goto out;
     }
-
-    /*
-     * should_block() ritarda il thread se supera MAX.
-     * Poi la syscall originale viene comunque eseguita.
-     */
-    int throttle_ret;
 
     throttle_ret = should_block(nr);
-    if (throttle_ret){
-        pr_info("[HOOK] syscall=%d aborted by throttle ret=%d\n", nr, throttle_ret);
-        return throttle_ret;
+    if (throttle_ret) {
+        ret = throttle_ret;
+        goto out;
     }
 
-    return ((asmlinkage long (*)(const struct pt_regs *))original)(regs);
+    ret = ((asmlinkage long (*)(const struct pt_regs *))original)(regs);
+
+out:
+    module_put(THIS_MODULE);
+    return ret;
 }
 
-/* ================= Patch x64_sys_call ================= */
 
+/*Installa la patch su x64_sys_call
+ - risolve l'indirizzo di x64_sys_call
+ - salva le istruzioni originali
+ - costruisce un jump relativo verso call()
+ - rende temporaneamente scrivibile il codice kernel
+ - applica la patch
+ */
 static int install_syscall_dispatcher_patch(void)
 {
+    long raw_offset;
     int offset;
 
     if (x64_sys_call_patched)
@@ -214,19 +226,21 @@ static int install_syscall_dispatcher_patch(void)
         return -ENOENT;
     }
 
-    memcpy(original_inst, (void *)x64_sys_call_addr, INST_LEN); //backup per cleanup
+    memcpy(original_inst, (void *)x64_sys_call_addr, INST_LEN);
 
     jump_inst[0] = 0xE9;
 
-    long raw_offset = (long)((unsigned long)call - x64_sys_call_addr - INST_LEN);
+    raw_offset = (long)((unsigned long)call -
+                        x64_sys_call_addr -
+                        INST_LEN);
 
     if (raw_offset > INT_MAX || raw_offset < INT_MIN) {
-        printk(KERN_ERR "%s: jump offset out of range: %ld\n", MODNAME, raw_offset);
+        printk(KERN_ERR "%s: jump offset out of range: %ld\n",
+               MODNAME, raw_offset);
         return -ERANGE;
     }
 
     offset = (int)raw_offset;
-
     memcpy(jump_inst + 1, &offset, sizeof(int));
 
     printk(KERN_INFO "%s: x64_sys_call=%px call=%px offset=%d\n",
@@ -236,9 +250,7 @@ static int install_syscall_dispatcher_patch(void)
            offset);
 
     begin_syscall_table_hack();
-
     memcpy((void *)x64_sys_call_addr, jump_inst, INST_LEN);
-
     end_syscall_table_hack();
 
     x64_sys_call_patched = true;
@@ -247,55 +259,66 @@ static int install_syscall_dispatcher_patch(void)
 
     return 0;
 }
-
+/*Ripristina le istruzioni originali di x64_sys_call,rimuovendo la patch installata dal modulo
+  La funzione ripristina il codice originale e riabilita il normale dispatcher del kernel
+ */
 static void remove_syscall_dispatcher_patch(void)
 {
     if (!x64_sys_call_patched || !x64_sys_call_addr)
         return;
 
     begin_syscall_table_hack();
-
     memcpy((void *)x64_sys_call_addr, original_inst, INST_LEN);
-
     end_syscall_table_hack();
 
     x64_sys_call_patched = false;
+    x64_sys_call_addr = 0;
 
     printk(KERN_INFO "%s: x64_sys_call restored\n", MODNAME);
 }
 
-/* Inizializzazione e patch della syscall table 
-    - Inizializzo il contatore che indica le syscall_hookate
-    - Trovo syscall_table
-    - Installo patch del dispatcher
-*/
 
+/*Inizializza il sistema di hooking delle syscall
+  - inizializza le strutture interne
+  - risolve sys_call_table
+  - installa la patch del dispatcher
+ */
 int syscall_hook_init(void)
 {
     int ret;
 
+    memset(hooks, 0, sizeof(hooks));
+
     hook_count = 0;
     sys_call_table = NULL;
     x64_sys_call_addr = 0;
-    x64_sys_call_patched = false; 
+    x64_sys_call_patched = false;
 
     sys_call_table = (unsigned long **)get_symbol_addr("sys_call_table");
     if (!sys_call_table) {
         printk(KERN_ERR "%s: sys_call_table not found\n", MODNAME);
         return -ENOENT;
     }
-    printk(KERN_INFO "%s: sys_call_table at %px\n",MODNAME, sys_call_table);
 
-    
-    ret = install_syscall_dispatcher_patch(); 
+    printk(KERN_INFO "%s: sys_call_table at %px\n",
+           MODNAME, sys_call_table);
+
+    ret = install_syscall_dispatcher_patch();
     if (ret) {
-        printk(KERN_ERR "%s: patch_x64_sys_call failed ret=%d\n",
+        printk(KERN_ERR "%s: install_syscall_dispatcher_patch failed ret=%d\n",
                MODNAME, ret);
+        sys_call_table = NULL;
         return ret;
     }
 
     return 0;
 }
+
+/*Cleanup completo del sistema di hooking.
+ - ripristina tutte le syscall originali
+ - libera le strutture allocate
+ - rimuove la patch da x64_sys_call
+*/
 
 void syscall_hook_cleanup(void)
 {
@@ -308,7 +331,7 @@ void syscall_hook_cleanup(void)
 
     begin_syscall_table_hack();
 
-    for (i = 0; i < hook_count; i++) {
+    for (i = 0; i < MAX_HOOKS; i++) {
         if (!hooks[i])
             continue;
 
@@ -316,13 +339,13 @@ void syscall_hook_cleanup(void)
             sys_call_table[hooks[i]->nr] =
                 (unsigned long *)hooks[i]->original;
 
-            hooks[i]->active = 0;
+            hooks[i]->active = false;
         }
     }
 
     end_syscall_table_hack();
 
-    for (i = 0; i < hook_count; i++) {
+    for (i = 0; i < MAX_HOOKS; i++) {
         kfree(hooks[i]);
         hooks[i] = NULL;
     }
@@ -338,6 +361,13 @@ void syscall_hook_cleanup(void)
     printk(KERN_INFO "%s: syscall hooks cleaned up\n", MODNAME);
 }
 
+/*Installa l'hook sulla syscall nr
+  - salva il puntatore originale
+  - sostituisce la syscall nella syscall table con generic_syscall_hook
+  - registra l'hook nella struttura interna
+ L'accesso concorrente alla tabella hooks[] è protetto tramite write_lock.
+*/
+
 int add_syscall_hook(int nr)
 {
     struct syscall_hook *h;
@@ -347,14 +377,14 @@ int add_syscall_hook(int nr)
 
     write_lock(&hooks_lock);
 
+    if (hooks[nr]) {
+        write_unlock(&hooks_lock);
+        return -EEXIST;
+    }
+
     if (hook_count >= MAX_HOOKS) {
         write_unlock(&hooks_lock);
         return -ENOMEM;
-    }
-
-    if (find_hook_nolock(nr)) {
-        write_unlock(&hooks_lock);
-        return -EEXIST;
     }
 
     h = kzalloc(sizeof(*h), GFP_KERNEL);
@@ -365,7 +395,7 @@ int add_syscall_hook(int nr)
 
     h->nr = nr;
     h->original = (unsigned long)sys_call_table[nr];
-    h->active = 0;
+    h->active = false;
 
     printk(KERN_INFO "%s: before hook table[%d]=%px\n",
            MODNAME, nr, sys_call_table[nr]);
@@ -376,8 +406,9 @@ int add_syscall_hook(int nr)
 
     end_syscall_table_hack();
 
-    h->active = 1;
-    hooks[hook_count++] = h;
+    h->active = true;
+    hooks[nr] = h;
+    hook_count++;
 
     printk(KERN_INFO "%s: hooked nr=%d original=%px new=%px\n",
            MODNAME,
@@ -390,43 +421,42 @@ int add_syscall_hook(int nr)
     return 0;
 }
 
+/*Rimuove l'hook dalla syscall nr.
+ - ripristina la syscall originale
+ - rimuove l'entry dalla struttura hooks[]
+ - libera la memoria associata all'hook
+*/
 int remove_syscall_hook(int nr)
 {
-    int i;
     struct syscall_hook *h;
 
-    if (!sys_call_table)
+    if (!sys_call_table || nr < 0 || nr >= MAX_SYSCALL_NR)
         return -EINVAL;
 
     write_lock(&hooks_lock);
 
-    for (i = 0; i < hook_count; i++) {
-        if (!hooks[i] || hooks[i]->nr != nr)
-            continue;
-
-        h = hooks[i];
-
-        begin_syscall_table_hack();
-
-        sys_call_table[nr] = (unsigned long *)h->original;
-
-        end_syscall_table_hack();
-
-        printk(KERN_INFO "%s: unhooked nr=%d restored=%px\n",
-               MODNAME, nr, (void *)h->original);
-
-        kfree(h);
-
-        hooks[i] = hooks[hook_count - 1];
-        hooks[hook_count - 1] = NULL;
-        hook_count--;
-
+    h = hooks[nr];
+    if (!h) {
         write_unlock(&hooks_lock);
-
-        return 0;
+        return -ENOENT;
     }
+
+    begin_syscall_table_hack();
+
+    sys_call_table[nr] = (unsigned long *)h->original;
+
+    end_syscall_table_hack();
+
+    h->active = false;
+    hooks[nr] = NULL;
+    hook_count--;
+
+    printk(KERN_INFO "%s: unhooked nr=%d restored=%px\n",
+           MODNAME, nr, (void *)h->original);
+
+    kfree(h);
 
     write_unlock(&hooks_lock);
 
-    return -ENOENT;
+    return 0;
 }

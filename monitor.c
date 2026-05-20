@@ -325,28 +325,14 @@ static int monitor_throttle_current(int nr)
 
 int should_block(int nr)
 {
-    int ret;
-
-    if (!try_module_get(THIS_MODULE))
+    if (!READ_ONCE(monitor_enabled))
         return 0;
 
-    if (!READ_ONCE(monitor_enabled)) {
-        module_put(THIS_MODULE);
+    if (!monitor_match_current_task(nr))
         return 0;
-    }
 
-    if (!monitor_match_current_task(nr)) {
-        module_put(THIS_MODULE);
-        return 0;
-    }
-
-    ret = monitor_throttle_current(nr);
-
-    module_put(THIS_MODULE);
-
-    return ret;
+    return monitor_throttle_current(nr);
 }
-
 
 
 /*Inizializzazione Monitor 
