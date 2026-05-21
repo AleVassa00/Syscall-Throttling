@@ -39,7 +39,8 @@ struct monitor_stats {
     int peak_delay_uid;
     char peak_delay_comm[16];
 
-    unsigned long long avg_blocked_threads_x1000;
+    unsigned long long avg_blocked_threads_global_x1000;
+    unsigned long long avg_blocked_threads_during_throttle_x1000;
     unsigned long peak_blocked_threads;
 };
 
@@ -260,9 +261,12 @@ int main(void)
                     stats.peak_delay_ms);
                 printf("Peak delay process: %s\n", stats.peak_delay_comm);
                 printf("Peak delay UID: %d\n", stats.peak_delay_uid);
-                printf("Average blocked threads: %llu.%03llu\n",
-                    stats.avg_blocked_threads_x1000 / 1000,
-                    stats.avg_blocked_threads_x1000 % 1000);
+                printf("Average blocked threads global: %llu.%03llu\n",
+                    stats.avg_blocked_threads_global_x1000 / 1000,           // ← corretto
+                    stats.avg_blocked_threads_global_x1000 % 1000);
+                printf("Average blocked threads during Throttle: %llu.%03llu\n",
+                    stats.avg_blocked_threads_during_throttle_x1000 / 1000,  // ← corretto
+                    stats.avg_blocked_threads_during_throttle_x1000 % 1000);
 
                 printf("Peak blocked threads: %lu\n",
                     stats.peak_blocked_threads);

@@ -30,11 +30,11 @@ static unsigned long peak_blocked_threads;
  */
 static u64 blocked_time_sum_ns;
 static u64 blocking_period_sum_ns;
+static u64 total_monitor_time_ns;
 static ktime_t last_update_time;
 
 static bool monitor_stats_running;
 static ktime_t monitor_start_time;
-static u64 accumulated_monitor_time_ns;
 
 /*
  * Aggiorna l'integrale temporale dei thread bloccati.
@@ -51,6 +51,8 @@ static void update_blocked_time_locked(void)
 
     now = ktime_get();
     delta_ns = ktime_to_ns(ktime_sub(now, last_update_time));
+
+    total_monitor_time_ns += delta_ns;
 
     blocked_time_sum_ns += delta_ns * currently_blocked;
 
@@ -78,12 +80,12 @@ static void stats_reset_locked(bool monitor_is_running)
     currently_blocked = 0;
     peak_blocked_threads = 0;
 
+    total_monitor_time_ns = 0;
     blocked_time_sum_ns = 0;
     blocking_period_sum_ns = 0;
 
     last_update_time = now;
 
-    accumulated_monitor_time_ns = 0;
     monitor_stats_running = monitor_is_running;
     monitor_start_time = monitor_is_running ? now : 0;
 }
@@ -125,20 +127,12 @@ void stats_on_monitor_start(void)
 void stats_on_monitor_stop(void)
 {
     unsigned long flags;
-    ktime_t now;
-    u64 delta_ns;
 
     spin_lock_irqsave(&stats_lock, flags);
 
     if (monitor_stats_running) {
-        update_blocked_time_locked();
-
-        now = ktime_get();
-        delta_ns = ktime_to_ns(ktime_sub(now, monitor_start_time));
-
-        accumulated_monitor_time_ns += delta_ns;
+        update_blocked_time_locked();   // ← aggiorna total_monitor_time_ns
         monitor_stats_running = false;
-
         currently_blocked = 0;
     }
 
@@ -202,6 +196,7 @@ void stats_get(struct monitor_stats *out)
     spin_lock_irqsave(&stats_lock, flags);
 
     update_blocked_time_locked();
+    
 
     out->peak_delay_ns = peak_delay_ns;
     out->peak_delay_us = peak_delay_ns / 1000;
@@ -212,12 +207,20 @@ void stats_get(struct monitor_stats *out)
 
     out->peak_blocked_threads = peak_blocked_threads;
 
+    if (total_monitor_time_ns > 0) {
+        out->avg_blocked_threads_global_x1000 =
+            div64_u64(blocked_time_sum_ns * 1000,
+                      total_monitor_time_ns);
+    } else {
+        out->avg_blocked_threads_global_x1000 = 0;
+    }
+
     if (blocking_period_sum_ns > 0) {
-        out->avg_blocked_threads_x1000 =
+        out->avg_blocked_threads_during_throttle_x1000 =
             div64_u64(blocked_time_sum_ns * 1000,
                       blocking_period_sum_ns);
     } else {
-        out->avg_blocked_threads_x1000 = 0;
+        out->avg_blocked_threads_during_throttle_x1000 = 0;
     }
 
     spin_unlock_irqrestore(&stats_lock, flags);

@@ -384,13 +384,17 @@ void monitor_cleanup(void)
 
     printk(KERN_INFO
        "[STATS] peak_delay_ns=%llu peak_delay_us=%llu peak_delay_ms=%llu "
-       "peak_uid=%d peak_prog=%s avg_blocked=%llu.%03llu peak_blocked=%lu\n",
+       "peak_uid=%d peak_prog=%s "
+       "avg_global=%llu.%03llu avg_throttle=%llu.%03llu "
+       "peak_blocked=%lu\n",
        s.peak_delay_ns,
        s.peak_delay_us,
        s.peak_delay_ms,
        s.peak_delay_uid,
        s.peak_delay_comm,
-       s.avg_blocked_threads_x1000 / 1000,
-       s.avg_blocked_threads_x1000 % 1000,
+       s.avg_blocked_threads_global_x1000 / 1000,
+       s.avg_blocked_threads_global_x1000 % 1000,
+       s.avg_blocked_threads_during_throttle_x1000 / 1000,
+       s.avg_blocked_threads_during_throttle_x1000 % 1000,
        s.peak_blocked_threads);
 }

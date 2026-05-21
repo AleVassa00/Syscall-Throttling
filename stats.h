@@ -13,7 +13,9 @@ struct monitor_stats {
     int peak_delay_uid;
     char peak_delay_comm[TASK_COMM_LEN];
 
-    u64 avg_blocked_threads_x1000;
+    u64 avg_blocked_threads_global_x1000;
+    u64 avg_blocked_threads_during_throttle_x1000;
+
     unsigned long peak_blocked_threads;
 };
 
