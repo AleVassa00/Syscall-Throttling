@@ -375,21 +375,21 @@ int add_syscall_hook(int nr)
     if (!sys_call_table || nr < 0 || nr >= MAX_SYSCALL_NR)
         return -EINVAL;
 
+    h = kzalloc(sizeof(*h), GFP_KERNEL);
+    if (!h)
+        return -ENOMEM;
+
     write_lock(&hooks_lock);
 
     if (hooks[nr]) {
         write_unlock(&hooks_lock);
+        kfree(h);
         return -EEXIST;
     }
 
     if (hook_count >= MAX_HOOKS) {
         write_unlock(&hooks_lock);
-        return -ENOMEM;
-    }
-
-    h = kzalloc(sizeof(*h), GFP_KERNEL);
-    if (!h) {
-        write_unlock(&hooks_lock);
+        kfree(h);
         return -ENOMEM;
     }
 
@@ -401,9 +401,7 @@ int add_syscall_hook(int nr)
            MODNAME, nr, sys_call_table[nr]);
 
     begin_syscall_table_hack();
-
     sys_call_table[nr] = (unsigned long *)generic_syscall_hook;
-
     end_syscall_table_hack();
 
     h->active = true;
@@ -411,16 +409,12 @@ int add_syscall_hook(int nr)
     hook_count++;
 
     printk(KERN_INFO "%s: hooked nr=%d original=%px new=%px\n",
-           MODNAME,
-           nr,
-           (void *)h->original,
-           (void *)generic_syscall_hook);
+           MODNAME, nr, (void *)h->original, (void *)generic_syscall_hook);
 
     write_unlock(&hooks_lock);
 
     return 0;
 }
-
 /*Rimuove l'hook dalla syscall nr.
  - ripristina la syscall originale
  - rimuove l'entry dalla struttura hooks[]

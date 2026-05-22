@@ -386,7 +386,7 @@ void monitor_cleanup(void)
        "[STATS] peak_delay_ns=%llu peak_delay_us=%llu peak_delay_ms=%llu "
        "peak_uid=%d peak_prog=%s "
        "avg_global=%llu.%03llu avg_throttle=%llu.%03llu "
-       "peak_blocked=%lu\n",
+       "total_blocked=%lu peak_blocked=%lu\n",
        s.peak_delay_ns,
        s.peak_delay_us,
        s.peak_delay_ms,
@@ -396,5 +396,7 @@ void monitor_cleanup(void)
        s.avg_blocked_threads_global_x1000 % 1000,
        s.avg_blocked_threads_during_throttle_x1000 / 1000,
        s.avg_blocked_threads_during_throttle_x1000 % 1000,
-       s.peak_blocked_threads);
+       s.blocked_threads_total,
+       s.peak_blocked_threads
+       );
 }

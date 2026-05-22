@@ -106,18 +106,43 @@ static int handle_program_ioctl(unsigned long arg, int add)
 }
 
 
+static int ioctl_requires_root(unsigned int cmd)
+{
+    switch (cmd) {
+        case IOCTL_ADD_SYSCALL:
+        case IOCTL_REMOVE_SYSCALL:
+        case IOCTL_ADD_UID:
+        case IOCTL_REMOVE_UID:
+        case IOCTL_ADD_PROGRAM_NAME:
+        case IOCTL_REMOVE_PROGRAM_NAME:
+        case IOCTL_ENABLE_MONITOR:
+        case IOCTL_DISABLE_MONITOR:
+        case IOCTL_SET_MAX:
+            return 1;
+
+        case IOCTL_GET_STATS:
+        case IOCTL_LIST_UIDS:
+        case IOCTL_LIST_PROGRAMS:
+        case IOCTL_LIST_SYSCALLS:
+            return 0;
+
+    default:
+        return 0;
+    }
+}
+
+
 /* Funzione di configurazione del Monitor */
-static long device_ioctl(struct file *file,
-                         unsigned int cmd,
-                         unsigned long arg)
+static long device_ioctl(struct file *file,unsigned int cmd,unsigned long arg)
 {
     int value;
-    int ret;
+    int ret = 0;
 
-    /* Verifica che il chiamante abbia privilegi root */
-    ret = check_root();
-    if (ret)
-        return ret;
+    if (ioctl_requires_root(cmd)) {
+        ret = check_root();
+        if (ret)
+            return ret;
+    }
 
     switch (cmd) {
 
@@ -357,6 +382,7 @@ static struct miscdevice dev = {
     .minor = MISC_DYNAMIC_MINOR,
     .name = "syscall_monitor",
     .fops = &fops,
+    .mode = 0666,
 };
 
 /*Inizializzazione del device Monitor

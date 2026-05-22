@@ -28,6 +28,8 @@
 
 #define IOCTL_GET_STATS _IOR('a', 10, struct monitor_stats)
 
+#define PROG_NAME_LEN 64
+
 #define MAX_UIDS     64
 #define MAX_PROGS    64
 #define MAX_SYSCALLS 512
@@ -41,6 +43,8 @@ struct monitor_stats {
 
     unsigned long long avg_blocked_threads_global_x1000;
     unsigned long long avg_blocked_threads_during_throttle_x1000;
+
+    unsigned long blocked_threads_total;
     unsigned long peak_blocked_threads;
 };
 
@@ -53,6 +57,7 @@ struct prog_entry {
     unsigned int major;
     unsigned int minor;
     unsigned long ino;
+    char name[PROG_NAME_LEN];
 };
 
 struct prog_list {
@@ -268,6 +273,9 @@ int main(void)
                     stats.avg_blocked_threads_during_throttle_x1000 / 1000,  // ← corretto
                     stats.avg_blocked_threads_during_throttle_x1000 % 1000);
 
+                printf("Total blocked threads: %lu\n",
+                    stats.blocked_threads_total);
+
                 printf("Peak blocked threads: %lu\n",
                     stats.peak_blocked_threads);
             }
@@ -312,12 +320,12 @@ int main(void)
             }
 
             for (i = 0; i < list.count; i++)
-                printf("  [%d] dev=%u:%u ino=%lu\n",
+                printf("  [%d] name=%s dev=%u:%u ino=%lu\n",
                        i,
+                       list.entries[i].name,
                        list.entries[i].major,
                        list.entries[i].minor,
                        list.entries[i].ino);
-
             break;
         }
 

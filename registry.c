@@ -497,6 +497,9 @@ int get_prog_list(struct prog_list *out)
         out->entries[i].major = MAJOR(entry->dev);
         out->entries[i].minor = MINOR(entry->dev);
         out->entries[i].ino   = entry->ino;
+        strscpy(out->entries[i].name,
+                entry->name,
+                sizeof(out->entries[i].name));
         i++;
     }
 

@@ -4,10 +4,13 @@
 #include <linux/types.h>
 #include <linux/cred.h>
 
+#define PROG_NAME_LEN 64
+
 /* ================= USERSPACE LIST =============== */
 #define MAX_UIDS     64
 #define MAX_PROGS    64
 #define MAX_SYSCALLS 512
+
 
 /* struct per trasferire le liste in userspace */
 struct uid_list {
@@ -21,6 +24,7 @@ struct prog_list {
         unsigned int major;
         unsigned int minor;
         unsigned long ino;
+        char name[PROG_NAME_LEN];
     } entries[MAX_PROGS];
 };
 

@@ -12,7 +12,7 @@ Il modulo consente di registrare dinamicamente:
 
 tramite un device driver accessibile da userspace mediante `ioctl()`.
 
-Quando una syscall registrata viene invocata da un UID registrato oppure da un programma registrato, il modulo applica un limite massimo `MAX` al numero di invocazioni consentite in una finestra temporale di 1 secondo. Se il limite viene superato, il thread chiamante viene temporaneamente bloccato prima dell'esecuzione effettiva della syscall.
+Quando una *syscall registrata* viene **invocata** da un *UID registrato* oppure da un *programma registrato*, il modulo applica un limite massimo `MAX` al numero di invocazioni consentite in una finestra temporale di 1 secondo. Se il limite viene superato, il thread chiamante viene temporaneamente bloccato prima dell'esecuzione effettiva della syscall.
 
 Il monitor può essere abilitato o disabilitato dinamicamente. Quando è disabilitato, le syscall vengono lasciate proseguire senza alcun limite.
 
@@ -59,19 +59,34 @@ device.c / device.h
 
 ## Device Driver and IOCTL Interface
 
-Il modulo espone un device `/dev/syscall_monitor`, registrato tramite interfaccia misc device.
+Il modulo espone un device `/dev/syscall_monitor`, registrato tramite interfaccia **misc device**.
 
-Il device supporta operazioni `ioctl()` per:
+Il device supporta operazioni `ioctl()`  divise in due categorie:
 
-* aggiungere o rimuovere syscall monitorate;
-* aggiungere o rimuovere UID monitorati;
-* aggiungere o rimuovere programmi monitorati;
-* abilitare o disabilitare il monitor;
-* impostare il valore `MAX`;
-* leggere le statistiche;
-* visualizzare le liste correnti di UID, programmi e syscall registrate.
+* ioctl di ***modifica della configurazione***;
 
-Le operazioni di modifica della configurazione sono consentite solo a processi con effective UID pari a `0`, come richiesto dalla specifica.
+  * Le ioctl di modifica sono consentite solo a processi con effective UID pari a `0`, come richiesto dalla specifica. In questa categoria rientrano:
+
+    * aggiunta/rimozione di syscall;
+    * aggiunta/rimozione di UID;
+    * aggiunta/rimozione di programmi;
+    * abilitazione/disabilitazione del monitor;
+    * modifica del valore `MAX`.
+
+* ioctl di ***sola lettura***.
+
+  * Le ioctl di sola lettura, invece, sono accessibili anche a utenti non privilegiati. In questa categoria rientrano:
+
+    * lettura delle statistiche;
+
+    * visualizzazione degli UID registrati;
+
+    * visualizzazione dei programmi registrati;
+
+    * visualizzazione delle syscall registrate.
+
+
+Per permettere anche agli utenti non privilegiati di aprire il device, `/dev/syscall_monitor` viene creato con permessi `0666`. La protezione delle operazioni critiche **non si basa quindi sui permessi del file device**, ma sul **controllo interno** effettuato dal modulo tramite `current_euid()`.
 
 ---
 
@@ -79,7 +94,7 @@ Le operazioni di modifica della configurazione sono consentite solo a processi c
 
 La gestione degli hook è implementata in `syscall_hook.c`.
 
-Per ogni syscall registrata, il modulo salva il puntatore originale e sostituisce la corrispondente entry nella `sys_call_table` con un wrapper generico.
+Per ogni syscall registrata, il modulo **salva il puntatore originale** e **sostituisce la corrispondente entry** nella `sys_call_table` con un **wrapper generico**.
 
 La struttura usata per rappresentare un hook è:
 
@@ -103,7 +118,7 @@ Gli hook sono salvati in un array indicizzato direttamente dal numero di syscall
 static struct syscall_hook *hooks[MAX_HOOKS];
 ```
 
-Questa scelta permette un lookup in tempo costante `O(1)`:
+Questa scelta permette un **lookup in tempo costante** `O(1)`:
 
 ```text
 nr syscall -> hooks[nr] -> puntatore originale
@@ -130,9 +145,9 @@ userspace syscall
 
 ---
 
-## Dispatcher Patch
+### Dispatcher Patch
 
-Sui kernel x86-64 moderni non è sempre sufficiente modificare direttamente la `sys_call_table`, perché il dispatcher può non effettuare un normale dispatch indiretto tramite la tabella.
+Sui kernel x86-64 moderni non è sempre sufficiente modificare direttamente la `sys_call_table`, perché il dispatcher **può non effettuare un normale dispatch indiretto tramite la tabella**.
 
 Per questo si applica una patch ai primi byte di `x64_sys_call`, inserendo un salto relativo verso una funzione custom `call()`.
 
@@ -143,7 +158,7 @@ mov (%1, %0, 8), %rax
 jmp __x86_indirect_thunk_rax
 ```
 
-Questa scelta consente di ripristinare un dispatch basato sulla syscall table, permettendo al modulo di intercettare le syscall registrate.
+Questa scelta consente di **ripristinare un dispatch basato sulla syscall table**, permettendo al modulo di intercettare le syscall registrate.
 
 Prima di modificare codice kernel read-only, il modulo:
 
@@ -175,7 +190,7 @@ static bool monitor_enabled;
 
 * `global_count` indica quante syscall monitorate sono state lasciate passare nella finestra corrente;
 * `window_generation` identifica la finestra temporale corrente;
-* `max_calls` rappresenta il valore `MAX` configurato;
+* `max_calls` rappresenta il valore `MAX` configurato relativa a una finestra temporale;
 * `monitor_enabled` indica se il monitor è attivo.
 
 Quando una syscall monitorata viene invocata, il monitor tenta di consumare uno slot tramite `try_consume_slot()`.
@@ -194,15 +209,16 @@ Se invece il limite è stato raggiunto, il thread viene messo in attesa su una w
 wait_event_interruptible(...)
 ```
 
-Il thread si risveglia quando:
+Il thread rimane in attesa su una wait queue tramite `wait_event_interruptible()` e può risvegliarsi quando:
 
-* viene aperta una nuova finestra temporale;
-* il monitor viene disabilitato;
-* arriva un segnale.
+* viene generata una nuova finestra temporale, rilevata tramite il cambio di `window_generation`;
+* il monitor viene disabilitato, causando il risveglio dei thread bloccati;
+* l'attesa viene interrotta da un segnale, ad esempio `SIGINT`.
+  * Nel caso di risveglio dovuto a segnale, la syscall originale non viene eseguita
 
 ---
 
-## Timer and Window Generation
+### Timer and Window Generation
 
 Il cambio finestra è gestito tramite un high-resolution timer (`hrtimer`).
 
@@ -226,7 +242,7 @@ Questo evita di affidarsi esclusivamente al wakeup e permette di distinguere:
 
 ---
 
-## Signal Handling During Throttling
+### Signal Handling During Throttling
 
 Il thread bloccato usa `wait_event_interruptible()`, quindi può essere risvegliato da un segnale, ad esempio `SIGINT` generato da `Ctrl+C`.
 
@@ -267,15 +283,15 @@ quindi il controllo se una syscall è monitorata è molto efficiente.
 
 ### UID Registry
 
-Gli UID monitorati sono memorizzati in una hash table.
+Gli UID monitorati sono memorizzati in una **hash table.**
 
 La sincronizzazione usa:
 
-* RCU per i lettori;
-* spinlock per gli scrittori;
+* **RCU** per i *lettori*;
+* **spinlock** per gli *scrittori*;
 * `kfree_rcu()` per la liberazione sicura dei nodi rimossi.
 
-Questa scelta ottimizza il path caldo, perché il lookup dell'UID può avvenire senza acquisire lock pesanti.
+Questa scelta ottimizza il *path caldo*, perché il lookup dell'UID può avvenire senza acquisire lock pesanti.
 
 ### Program Registry
 
@@ -287,17 +303,19 @@ I programmi sono registrati tramite la coppia:
 
 anziché tramite il path testuale.
 
+Il basename del path fornito in fase di registrazione viene mantenuto solo come *metadato diagnostico*, così da rendere più leggibile il listing dei programmi registrati. Il nome non viene usato nel path caldo e non partecipa al matching runtime.
+
 Questo evita problemi dovuti a path rinominati, link simbolici o ambiguità tra file con lo stesso nome.
 
 Anche il registry dei programmi usa:
 
-* RCU per i lettori;
-* spinlock per gli scrittori;
+* **RCU** per i *lettori*;
+* **spinlock** per gli *scrittori*;
 * `kfree_rcu()` per la rimozione sicura.
 
 ---
 
-## Program Identification
+#### Program Identification
 
 Quando un programma viene registrato, il path ricevuto da userspace viene risolto tramite `kern_path()`.
 
@@ -354,42 +372,27 @@ if (global_count < max_calls)
 
 Queste primitive impediscono al compilatore di ottimizzare in modo non corretto letture e scritture concorrenti.
 
-### Statistics
+## Statistics
 
 Le statistiche sono protette da uno spinlock dedicato `stats_lock`.
 
-Questo garantisce consistenza tra campi correlati, come:
-
-* peak delay;
-* nome processo associato;
-* UID associato;
-* numero corrente e massimo di thread bloccati.
-
----
-
-## Statistics
-
-La specifica richiede di fornire informazioni relative a:
+Vengono fornite statistiche che riguardano:
 
 * peak delay per l'esecuzione effettiva di una syscall;
 * programma e UID associati al peak delay;
 * numero medio di thread bloccati;
-* numero massimo di thread bloccati.
+* numero totale di eventi di blocco;
+* numero massimo di thread bloccati contemporaneamente.
 
 ### Peak Delay
 
-Il peak delay rappresenta il massimo tempo di attesa osservato tra:
-
-```text
-inizio blocco del thread
-fine blocco del thread
-```
+Il peak delay rappresenta il massimo tempo di attesa osservato tra l'inizio blocco del thread e fine blocco del thread.
 
 Quando un thread bloccato ottiene finalmente uno slot oppure viene risvegliato per monitor disabilitato/segnale, viene calcolato il delay e confrontato con il massimo corrente.
 
 ### Average Blocked Threads
 
-La media dei thread bloccati viene calcolata tramite integrazione temporale.
+La media dei thread bloccati viene calcolata tramite **<u>integrazione temporale</u>**.
 
 Il modulo mantiene:
 
@@ -413,6 +416,15 @@ Il valore viene scalato per 1000 per mantenere tre cifre decimali senza usare fl
 
 ---
 
+### Total and Peak Blocked Threads
+
+Oltre alla media temporale dei thread bloccati, il modulo mantiene anche:
+
+```c
+blocked_threads_total
+peak_blocked_threads
+```
+
 ## Module Lifetime Protection
 
 Il wrapper generico usa il reference counting del modulo tramite:
@@ -422,7 +434,7 @@ try_module_get(THIS_MODULE)
 module_put(THIS_MODULE)
 ```
 
-Questo evita che il modulo venga scaricato mentre un thread sta ancora eseguendo codice del wrapper o del monitor.
+*Questo evita che il modulo venga scaricato mentre un thread sta ancora eseguendo codice del wrapper o del monitor.*
 
 Se il modulo è in uso, `rmmod` fallisce con modulo occupato.
 
@@ -550,44 +562,82 @@ sudo apt install linux-headers-$(uname -r)
 
 ## Userspace Configurator
 
-Il progetto include un programma userspace per configurare il monitor tramite ioctl.
+Il progetto include un programma userspace per configurare e interrogare il monitor tramite `ioctl()`.
 
-Esempio di uso:
+Il device `/dev/syscall_monitor` può essere aperto anche da utenti non privilegiati. Tuttavia, le operazioni di modifica della configurazione sono consentite solo a processi con effective UID pari a `0`.
+
+Di conseguenza, il configurator può essere avviato senza privilegi root per eseguire operazioni di sola lettura:
 
 ```bash
+./configurator
+```
+
+Operazioni disponibili anche senza privilegi root:
+
+```
+10. Get stats
+11. List registered UIDs
+12. List registered programs
+13. List registered syscalls
+```
+
+Per modificare la configurazione del monitor è invece necessario eseguire il configurator con privilegi root:
+
+```
 sudo ./configurator
 ```
 
-Operazioni tipiche:
+Operazioni che richiedono privilegi root:
 
-```text
+```
 1. Add syscall number
-2. Add UID
-3. Set MAX calls per window
-4. Enable monitor
-5. Get stats
+2. Remove syscall number
+3. Add UID
+4. Remove UID
+5. Add program by executable path
+6. Remove program by executable path
+7. Enable monitor
+8. Disable monitor
+9. Set MAX calls per window
 ```
 
-Esempio per monitorare `getpid`:
+Esempio per monitorare la syscall `getpid` per un determinato UID:
 
-```text
-Add syscall number: 39
-Add UID: <uid>
-Set MAX: 1
-Enable monitor
+```
+1. Add syscall number: 39
+3. Add UID: <uid>
+9. Set MAX calls per window: 10
+7. Enable monitor
 ```
 
----
+Dopo aver avviato un programma di test che genera chiamate a `getpid`, è possibile consultare le statistiche tramite:
+
+```
+10. Get stats
+```
+
+Esempio di output:
+
+```
+=== MONITOR STATS ===
+Peak delay: 99852704966 ns (99852704 us, 99852 ms)
+Peak delay process: test_mt
+Peak delay UID: 1001
+Average blocked threads global: 21.156
+Average blocked threads during Throttle: 41.260
+Total blocked threads: 121
+Peak blocked threads: 99
+```
 
 ## Testing
 
-| Test                   | Scopo                                          | Syscall |
-| ---------------------- | ---------------------------------------------- | ------- |
-| test_basic.c           | verifica hooking base                          | write   |
-| test2.c                | stress single-thread controllato               | getpid  |
-| test_multithread.c     | concorrenza e statistiche thread bloccati      | getpid  |
-| test_sleep.c           | unload del modulo e reference count            | getpid  |
-| test_mkdir_interrupt.c | interruzione con Ctrl+C e syscall non eseguita | mkdir   |
+| Test              | Scopo                                          | Syscall |
+| ----------------- | ---------------------------------------------- | ------- |
+| test_basic.c      | verifica hooking base                          | write   |
+| test2.c           | stress single-thread controllato               | getpid  |
+| test_mult.c       | concorrenza e statistiche thread bloccati      | getpid  |
+| test_sleep.c      | unload del modulo e reference count            | getpid  |
+| test_mkdir_stop.c | interruzione con Ctrl+C e syscall non eseguita | mkdir   |
 
 ### Module Unload Test
 

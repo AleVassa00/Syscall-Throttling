@@ -16,6 +16,7 @@ struct monitor_stats {
     u64 avg_blocked_threads_global_x1000;
     u64 avg_blocked_threads_during_throttle_x1000;
 
+    unsigned long blocked_threads_total;
     unsigned long peak_blocked_threads;
 };
 

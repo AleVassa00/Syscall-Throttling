@@ -204,7 +204,7 @@ void stats_get(struct monitor_stats *out)
 
     out->peak_delay_uid = peak_delay_uid;
     strscpy(out->peak_delay_comm, peak_delay_comm, TASK_COMM_LEN);
-
+    out->blocked_threads_total = blocked_threads_total;
     out->peak_blocked_threads = peak_blocked_threads;
 
     if (total_monitor_time_ns > 0) {
