@@ -127,18 +127,11 @@ static int try_consume_slot(void)
     return allowed;
 }
 
-/*
- * Abilita o disabilita il monitor syscall throttling.
- *
- * In fase di abilitazione:
- *   - resetta il contatore globale
- *   - avvia il timer periodico
- *   - inizializza una nuova finestra logica
- *
- * In fase di disabilitazione:
- *   - cancella il timer
- *   - risveglia eventuali thread bloccati
- */
+/*Abilita il monitor syscall throttling
+ - resetta il contatore globale
+ - avvia il timer periodico
+ - inizializza una nuova finestra logica
+*/
 
 void monitor_enable(void)
 {
@@ -164,6 +157,10 @@ void monitor_enable(void)
 
     printk(KERN_INFO "[MONITOR] ENABLED\n");
 }
+/*Disabilita il monitor syscall throttling
+ - cancella il timer
+ - risveglia eventuali thread bloccati
+*/
 
 void monitor_disable(void)
 {
@@ -188,15 +185,10 @@ void monitor_disable(void)
     printk(KERN_INFO "[MONITOR] DISABLED\n");
 }
 
-/*
- * Aggiorna dinamicamente il parametro MAX.
- *
- * MAX rappresenta il numero massimo di syscall consentite
- * all'interno della finestra temporale corrente.
- *
- * Il cambio di configurazione provoca anche il reset
- * delle statistiche runtime.
- */
+/*Aggiorna dinamicamente il parametro MAX.
+ MAX rappresenta il numero massimo di syscall consentite all'interno della finestra temporale corrente.
+ Il cambio di configurazione provoca anche il reset delle statistiche runtime.
+*/
 void monitor_set_max(unsigned long val)
 {
     if (val == 0)
