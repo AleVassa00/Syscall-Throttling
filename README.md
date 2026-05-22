@@ -644,7 +644,7 @@ Peak blocked threads: 99
 Per testare la protezione del modulo:
 
 1. avviare un test che genera syscall monitorate;
-2. provare a rimuovere il modulo con `rmmod`.
+2. provare a rimuovere il modulo con `make remove`.
 
 Se un thread è dentro il wrapper o il monitor, il modulo risulta in uso e non viene scaricato.
 
