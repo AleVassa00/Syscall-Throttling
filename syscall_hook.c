@@ -30,9 +30,9 @@ struct syscall_hook {
 };
 
 /*
- * hooks[nr] contiene la struttura associata alla syscall nr.
- * Questo evita la ricerca lineare e rende il lookup O(1).
- */
+ hooks[nr] contiene la struttura associata alla syscall nr.
+ Questo evita la ricerca lineare e rende il lookup O(1).
+*/
 static struct syscall_hook *hooks[MAX_HOOKS];
 static int hook_count;
 static DEFINE_RWLOCK(hooks_lock);
@@ -94,10 +94,10 @@ static inline void conditional_cet_enable(void)
 }
 
 /*Disabilita temporaneamente le protezioni hardware necessarie per modificare codice kernel read-only
- *- disabilita la preemption
- *- salva CR0/CR4
- *- disabilita CET se presente
- *- rimuove il bit Write Protect da CR0
+ - disabilita la preemption
+ - salva CR0/CR4
+ - disabilita CET se presente
+ - rimuove il bit Write Protect da CR0
 */
 static inline void begin_syscall_table_hack(void)
 {
@@ -230,20 +230,17 @@ static int install_syscall_dispatcher_patch(void)
 
     jump_inst[0] = 0xE9;
 
-    raw_offset = (long)((unsigned long)call -
-                        x64_sys_call_addr -
-                        INST_LEN);
+    raw_offset = (long)((unsigned long)call - x64_sys_call_addr - INST_LEN);
 
     if (raw_offset > INT_MAX || raw_offset < INT_MIN) {
-        printk(KERN_ERR "%s: jump offset out of range: %ld\n",
-               MODNAME, raw_offset);
+        printk(KERN_ERR "%s: jump offset out of range: %ld\n", MODNAME, raw_offset);
         return -ERANGE;
     }
 
     offset = (int)raw_offset;
     memcpy(jump_inst + 1, &offset, sizeof(int));
 
-    printk(KERN_INFO "%s: x64_sys_call=%px call=%px offset=%d\n",
+    printk(KERN_INFO "%s: x64_sys_call=%px call=%px offset=%d\n", 
            MODNAME,
            (void *)x64_sys_call_addr,
            (void *)call,
@@ -261,7 +258,7 @@ static int install_syscall_dispatcher_patch(void)
 }
 /*Ripristina le istruzioni originali di x64_sys_call,rimuovendo la patch installata dal modulo
   La funzione ripristina il codice originale e riabilita il normale dispatcher del kernel
- */
+*/
 static void remove_syscall_dispatcher_patch(void)
 {
     if (!x64_sys_call_patched || !x64_sys_call_addr)

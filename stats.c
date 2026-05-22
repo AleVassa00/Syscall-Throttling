@@ -18,15 +18,16 @@ static unsigned long currently_blocked;
 static unsigned long peak_blocked_threads;
 
 /*
- * blocked_time_sum_ns:
- *   integrale temporale di currently_blocked.
- *
- * blocking_period_sum_ns:
- *   tempo totale in cui almeno un thread era bloccato.
- *
- * avg_blocked_threads_x1000:
- *   blocked_time_sum_ns / blocking_period_sum_ns,
- *   scalato x1000 per mantenere tre cifre decimali.
+ blocked_time_sum_ns:
+   integrale temporale di currently_blocked
+   Esempio: se per 2 secondi ci sono 3 thread bloccati, contribuisce con 2s * 3.
+ blocking_period_sum_ns:
+   tempo totale in cui almeno un thread era bloccato
+   total_monitor_time_ns:
+   tempo totale in cui il monitor è stato attivo
+ Da questi valori derivano due medie:
+ - media globale: thread bloccati medi sull'intero tempo di monitoraggio
+ - media durante throttle: thread bloccati medi solo nei periodi con blocchi attivi
  */
 static u64 blocked_time_sum_ns;
 static u64 blocking_period_sum_ns;
@@ -36,11 +37,10 @@ static ktime_t last_update_time;
 static bool monitor_stats_running;
 static ktime_t monitor_start_time;
 
-/*
- * Aggiorna l'integrale temporale dei thread bloccati.
- *
- * Questa funzione deve essere chiamata sotto stats_lock.
- */
+/*Aggiorna le statistiche temporali accumulate dall'ultimo aggiornamento
+  Deve essere chiamata sotto stats_lock perché legge e modifica currently_blocked, total_monitor_time_ns, blocked_time_sum_ns,
+  blocking_period_sum_ns e last_update_time.
+*/
 static void update_blocked_time_locked(void)
 {
     ktime_t now;
@@ -62,12 +62,8 @@ static void update_blocked_time_locked(void)
     last_update_time = now;
 }
 
-/*
- * Reset interno delle statistiche.
- *
- * Se monitor_is_running è true, le statistiche ripartono
- * immediatamente da una nuova origine temporale.
- */
+/*Reset interno delle statistiche
+*/
 static void stats_reset_locked(bool monitor_is_running)
 {
     ktime_t now = ktime_get();
@@ -123,7 +119,8 @@ void stats_on_monitor_start(void)
 
     spin_unlock_irqrestore(&stats_lock, flags);
 }
-
+/*Prima di fermare il monitor, aggiorna le statistiche temporali fino all'istante corrente.
+*/
 void stats_on_monitor_stop(void)
 {
     unsigned long flags;
@@ -131,7 +128,7 @@ void stats_on_monitor_stop(void)
     spin_lock_irqsave(&stats_lock, flags);
 
     if (monitor_stats_running) {
-        update_blocked_time_locked();   // ← aggiorna total_monitor_time_ns
+        update_blocked_time_locked();  
         monitor_stats_running = false;
         currently_blocked = 0;
     }
@@ -139,6 +136,10 @@ void stats_on_monitor_stop(void)
     spin_unlock_irqrestore(&stats_lock, flags);
 }
 
+/*Chiamata quando un thread entra in stato di blocco
+  Aggiorna prima gli integrali temporali usando il valore precedente di currently_blocked, poi incrementa il numero di thread bloccati
+  e aggiorna il picco se necessario.
+*/
 void stats_on_block_start(unsigned long *blocked_now,unsigned long *peak_now)
 {
     unsigned long flags;
@@ -162,6 +163,11 @@ void stats_on_block_start(unsigned long *blocked_now,unsigned long *peak_now)
     spin_unlock_irqrestore(&stats_lock, flags);
 }
 
+
+/*Chiamata quando un thread termina il periodo di blocco
+ Aggiorna gli integrali temporali usando il numero di thread bloccati prima dell'uscita, poi decrementa currently_blocked
+ Se il delay appena misurato è il massimo osservato, salva anche UID e nome del processo associato.
+ */
 void stats_on_block_end(u64 delay_ns, kuid_t uid, const char *comm)
 {
     unsigned long flags;
@@ -207,6 +213,10 @@ void stats_get(struct monitor_stats *out)
     out->blocked_threads_total = blocked_threads_total;
     out->peak_blocked_threads = peak_blocked_threads;
 
+    /*Media globale dei thread bloccati sull'intero tempo in cui il monitor è stato attivo
+     Formula:
+     blocked_time_sum_ns / total_monitor_time_ns
+     */
     if (total_monitor_time_ns > 0) {
         out->avg_blocked_threads_global_x1000 =
             div64_u64(blocked_time_sum_ns * 1000,
@@ -215,6 +225,10 @@ void stats_get(struct monitor_stats *out)
         out->avg_blocked_threads_global_x1000 = 0;
     }
 
+    /*Media dei thread bloccati considerando solo i periodi in cui almeno un thread era effettivamente bloccato
+     Formula:
+     blocked_time_sum_ns / blocking_period_sum_ns
+    */
     if (blocking_period_sum_ns > 0) {
         out->avg_blocked_threads_during_throttle_x1000 =
             div64_u64(blocked_time_sum_ns * 1000,

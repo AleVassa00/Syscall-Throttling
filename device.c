@@ -105,6 +105,9 @@ static int handle_program_ioctl(unsigned long arg, int add)
     return ret;
 }
 
+/*
+ Stabilisce quali ioctl modificano la configurazione del monitor e quindi devono essere eseguibili solo da root
+ */
 
 static int ioctl_requires_root(unsigned int cmd)
 {
@@ -132,7 +135,10 @@ static int ioctl_requires_root(unsigned int cmd)
 }
 
 
-/* Funzione di configurazione del Monitor */
+/*Dispatcher principale delle ioctl del device
+  Prima verifica, quando necessario, che il chiamante abbia eUID root
+  Poi esegue il comando richiesto.
+ */
 static long device_ioctl(struct file *file,unsigned int cmd,unsigned long arg)
 {
     int value;
@@ -146,11 +152,12 @@ static long device_ioctl(struct file *file,unsigned int cmd,unsigned long arg)
 
     switch (cmd) {
 
-    /*Comando che consente di aggiungere una syscall tra quelle monitorate dal modulo
-     - Lettura numero syscall da userspace
-     - Registrazione syscall nel registry
-     - Installazione hook nella syscall table
-     */
+    /*Comando che consente di aggiungere una syscall tra quelle monitorate
+    - Legge il numero della syscall da userspace
+    - Registra la syscall nel registry
+    - Installa l'hook nella syscall table
+    Se l'installazione dell'hook fallisce, la syscall viene rimossa dal registry per mantenere lo stato interno coerente.
+    */
     case IOCTL_ADD_SYSCALL:
 
         ret = get_int_from_user(arg, &value);
@@ -169,10 +176,9 @@ static long device_ioctl(struct file *file,unsigned int cmd,unsigned long arg)
 
         break;
 
-    /*Comando che consente di rimuovere una syscall dal monitor
-     - Rimozione hook syscall
-     - Deregistrazione syscall dal registry
-     */
+    /*Rimuove una syscall dal monitor
+    L'hook viene rimosso prima della deregistrazione dal registry,così si evita che una syscall risulti non registrata ma ancora intercettata dal modulo.
+    */
     case IOCTL_REMOVE_SYSCALL:
 
         ret = get_int_from_user(arg, &value);
@@ -378,6 +384,11 @@ static const struct file_operations fops = {
     .unlocked_ioctl = device_ioctl,
 };
 
+
+/*
+Il device è apribile da tutti per consentire anche la lettura di statistiche e liste. Le operazioni di configurazione sono
+comunque protette a livello ioctl tramite controllo eUID root.
+*/
 static struct miscdevice dev = {
     .minor = MISC_DYNAMIC_MINOR,
     .name = "syscall_monitor",
@@ -404,7 +415,9 @@ int device_init(void)
 
     return 0;
 }
-
+/*Rimuove il misc device associato a /dev/syscall_monitor.
+  Deve essere chiamata durante lo scaricamento del modulo.
+*/
 void device_cleanup(void)
 {
     misc_deregister(&dev);
