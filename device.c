@@ -212,11 +212,12 @@ static long device_ioctl(struct file *file,unsigned int cmd,unsigned long arg)
     /* Comando che consente di rimuovere un UID dall'insieme degli utenti monitorati
      */
     case IOCTL_REMOVE_UID:
-
         ret = get_int_from_user(arg, &value);
-        if (!ret)
+        if (!ret) {
             ret = remove_user_id(value);
-
+            if (!ret)
+                monitor_wake_throttled();
+        }
         break;
 
     /*Comando che consente di registrare un programma monitorato tramite inode dell'eseguibile.
@@ -229,10 +230,10 @@ static long device_ioctl(struct file *file,unsigned int cmd,unsigned long arg)
     /*Comando che consente di rimuovere un programma dall'insieme di quelli monitorati.
      */
     case IOCTL_REMOVE_PROGRAM_NAME:
-
         ret = handle_program_ioctl(arg, 0);
-        break;
-
+        if (!ret)
+            monitor_wake_throttled();
+        break; 
     /*Attivazione del monitor syscall throttling
      Da questo momento:
      - Le syscall registrate vengono intercettate

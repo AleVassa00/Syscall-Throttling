@@ -213,7 +213,7 @@ Il thread rimane in attesa su una wait queue tramite `wait_event_interruptible()
 
 * viene generata una nuova finestra temporale, rilevata tramite il cambio di `window_generation`;
 * il monitor viene disabilitato, causando il risveglio dei thread bloccati;
-* la syscall viene rimossa dal monitor mentre il thread è bloccato, causando il risveglio immediato senza consumare slot;
+* il task non è più monitorato, perché la syscall, l'UID o il programma associato sono stati rimossi;
 * l'attesa viene interrotta da un segnale, ad esempio `SIGINT`.
   * Nel caso di risveglio dovuto a segnale, la syscall originale non viene eseguita
 
@@ -253,9 +253,14 @@ Questa scelta è coerente con la semantica del progetto: il thread bloccato non 
 
 ---
 
-### Syscall Removal During Throttling 
+### Deregistration During Throttling
 
-Quando una syscall viene rimossa tramite `IOCTL_REMOVE_SYSCALL`, il modulo chiama  `monitor_wake_throttled()` per risvegliare immediatamente i thread bloccati in attesa  su quella syscall, evitando che restino bloccati fino al cambio finestra successivo. Al risveglio, il thread controlla se la syscall è ancora monitorata. Se non lo è,  esce dal loop di throttling senza consumare slot e senza eseguire la syscall originale.
+Quando una syscall, un UID o un programma viene rimosso tramite ioctl, il modulo 
+chiama `monitor_wake_throttled()` per risvegliare immediatamente i thread bloccati 
+in attesa, evitando che restino bloccati fino al cambio finestra successivo.
+
+Al risveglio, il thread chiama `monitor_match_current_task()` per verificare se è 
+ancora monitorato. Se non lo è, esce dal loop di throttling senza consumare slot.
 
 ## Registry Design
 

@@ -288,24 +288,25 @@ static int monitor_throttle_current(int nr)
         }
 
         my_generation = READ_ONCE(window_generation);
-        ret = wait_event_interruptible(throttle_wq,READ_ONCE(window_generation) != my_generation ||!READ_ONCE(monitor_enabled) ||!is_syscall_monitored(nr));        if (ret) {
+        ret = wait_event_interruptible(throttle_wq,
+            READ_ONCE(window_generation) != my_generation ||
+            !READ_ONCE(monitor_enabled) ||
+            !monitor_match_current_task(nr));
 
+        if (ret) {
             if (was_blocked) {
-
                 s64 delay_ns = ktime_to_ns(ktime_sub(ktime_get(), block_start));
                 stats_on_block_end((u64)delay_ns, current_euid(), current->comm);
             }
-
-
-            pr_info("[THROTTLE] interrupted pid=%d prog=%s\n",current->pid, current->comm);
+            pr_info("[THROTTLE] interrupted pid=%d prog=%s\n", current->pid, current->comm);
             return ret;
         }
-       if (!is_syscall_monitored(nr)) {
+        if (!monitor_match_current_task(nr)) {
             if (was_blocked) {
                 s64 delay_ns = ktime_to_ns(ktime_sub(ktime_get(), block_start));
                 stats_on_block_end((u64)delay_ns, current_euid(), current->comm);
-             }
-        return 0;
+            }
+            return 0;
         }
     }
 
