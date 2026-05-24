@@ -239,6 +239,11 @@ static int monitor_match_current_task(int nr)
 }
 
 
+void monitor_wake_throttled(void)
+{
+    wake_up_all(&throttle_wq);
+}
+
 
 /*Implementa il meccanismo di throttling vero e proprio.
  Il thread:
@@ -283,8 +288,7 @@ static int monitor_throttle_current(int nr)
         }
 
         my_generation = READ_ONCE(window_generation);
-        ret = wait_event_interruptible(throttle_wq,READ_ONCE(window_generation) != my_generation ||!READ_ONCE(monitor_enabled));
-        if (ret) {
+        ret = wait_event_interruptible(throttle_wq,READ_ONCE(window_generation) != my_generation ||!READ_ONCE(monitor_enabled) ||!is_syscall_monitored(nr));        if (ret) {
 
             if (was_blocked) {
 
@@ -292,8 +296,16 @@ static int monitor_throttle_current(int nr)
                 stats_on_block_end((u64)delay_ns, current_euid(), current->comm);
             }
 
+
             pr_info("[THROTTLE] interrupted pid=%d prog=%s\n",current->pid, current->comm);
             return ret;
+        }
+       if (!is_syscall_monitored(nr)) {
+            if (was_blocked) {
+                s64 delay_ns = ktime_to_ns(ktime_sub(ktime_get(), block_start));
+                stats_on_block_end((u64)delay_ns, current_euid(), current->comm);
+             }
+        return 0;
         }
     }
 
@@ -303,6 +315,7 @@ static int monitor_throttle_current(int nr)
             ktime_sub(ktime_get(), block_start));
         stats_on_block_end((u64)delay_ns, current_euid(), current->comm);
     }
+
 
     return 0;
 }

@@ -195,6 +195,7 @@ static long device_ioctl(struct file *file,unsigned int cmd,unsigned long arg)
                    "[DEVICE] remove_syscall failed after unhook ret=%d\n",
                    ret);
         }
+        monitor_wake_throttled();
 
         break;
 
