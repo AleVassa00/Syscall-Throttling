@@ -291,7 +291,7 @@ static int monitor_throttle_current(int nr)
         ret = wait_event_interruptible(throttle_wq,
             READ_ONCE(window_generation) != my_generation ||
             !READ_ONCE(monitor_enabled) ||
-            !is_syscall_monitored(nr));
+            !monitor_match_current_task(nr));
 
         if (ret) {
             if (was_blocked) {
