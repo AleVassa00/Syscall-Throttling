@@ -225,7 +225,7 @@ static int install_syscall_dispatcher_patch(void)
                MODNAME);
         return -ENOENT;
     }
-
+    //salvo primi 5 byte di istruzioni originali
     memcpy(original_inst, (void *)x64_sys_call_addr, INST_LEN);
 
     jump_inst[0] = 0xE9;
@@ -384,18 +384,11 @@ int add_syscall_hook(int nr)
         return -EEXIST;
     }
 
-    if (hook_count >= MAX_HOOKS) {
-        write_unlock(&hooks_lock);
-        kfree(h);
-        return -ENOMEM;
-    }
-
     h->nr = nr;
     h->original = (unsigned long)sys_call_table[nr];
     h->active = false;
 
-    printk(KERN_INFO "%s: before hook table[%d]=%px\n",
-           MODNAME, nr, sys_call_table[nr]);
+    printk(KERN_INFO "%s: before hook table[%d]=%px\n",MODNAME, nr, sys_call_table[nr]);
 
     begin_syscall_table_hack();
     sys_call_table[nr] = (unsigned long *)generic_syscall_hook;
@@ -405,8 +398,7 @@ int add_syscall_hook(int nr)
     hooks[nr] = h;
     hook_count++;
 
-    printk(KERN_INFO "%s: hooked nr=%d original=%px new=%px\n",
-           MODNAME, nr, (void *)h->original, (void *)generic_syscall_hook);
+    printk(KERN_INFO "%s: hooked nr=%d original=%px new=%px\n",MODNAME, nr, (void *)h->original, (void *)generic_syscall_hook);
 
     write_unlock(&hooks_lock);
 
