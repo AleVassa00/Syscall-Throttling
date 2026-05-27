@@ -153,7 +153,7 @@ static unsigned long get_original_syscall(int nr)
     read_lock(&hooks_lock);
 
     h = hooks[nr];
-    if (h && h->active){
+    if (h ){
         original = h->original;
     }
 
@@ -332,11 +332,8 @@ void syscall_hook_cleanup(void)
         if (!hooks[i])
             continue;
 
-        if (hooks[i]->active) {
-            sys_call_table[hooks[i]->nr] =
-                (unsigned long *)hooks[i]->original;
-
-            hooks[i]->active = false;
+        if (hooks[i]) {
+            sys_call_table[hooks[i]->nr] = (unsigned long *)hooks[i]->original;
         }
     }
 
@@ -386,7 +383,6 @@ int add_syscall_hook(int nr)
 
     h->nr = nr;
     h->original = (unsigned long)sys_call_table[nr];
-    h->active = false;
 
     printk(KERN_INFO "%s: before hook table[%d]=%px\n",MODNAME, nr, sys_call_table[nr]);
 
@@ -394,7 +390,6 @@ int add_syscall_hook(int nr)
     sys_call_table[nr] = (unsigned long *)generic_syscall_hook;
     end_syscall_table_hack();
 
-    h->active = true;
     hooks[nr] = h;
     hook_count++;
 
@@ -430,7 +425,6 @@ int remove_syscall_hook(int nr)
 
     end_syscall_table_hack();
 
-    h->active = false;
     hooks[nr] = NULL;
     hook_count--;
 
